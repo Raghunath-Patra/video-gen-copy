@@ -1,0 +1,33 @@
+# railway.toml - Railway deployment configuration
+[build]
+  builder = "nixpacks"
+  buildCommand = "npm ci && npm run build:production"
+
+[deploy]
+  startCommand = "npm start"
+  restartPolicyType = "always"
+  restartPolicyMaxRetries = 10
+
+[environments.production]
+  variables = [
+    "NODE_ENV=production",
+    "PORT=3000"
+  ]
+
+# Health check configuration
+[environments.production.healthcheck]
+  path = "/health"
+  timeout = 30
+  interval = 30
+
+# Resource limits for Railway
+[environments.production.resources]
+  memory = "2GB"
+  cpu = "1vCPU"
+
+# Environment-specific settings
+[environments.staging]
+  variables = [
+    "NODE_ENV=staging",
+    "PORT=3000"
+  ]

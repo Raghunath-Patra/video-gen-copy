@@ -1,0 +1,52 @@
+# Environment variables
+.env
+
+# Dependencies
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+
+# Temporary folders
+temp/*
+!temp/.gitkeep
+uploads/*
+!uploads/.gitkeep
+
+# Output directories (keep structure but not content)
+output/web_projects/*
+!output/web_projects/.gitkeep
+output/*.mp4
+output/*.json
+
+# Logs
+logs
+*.log
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build outputs
+dist/
+build/

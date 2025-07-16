@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Educational Video Generator</title>
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎬 Educational Video Generator</h1>
+            <p>Transform your educational content into engaging videos with AI-powered narration and visuals</p>
+        </div>
+
+        <!-- Navigation Tabs -->
+        <div class="navigation-tabs">
+            <button class="nav-tab active" onclick="showTab('projects')">
+                📁 My Projects
+            </button>
+            <button class="nav-tab" onclick="showTab('create')">
+                ➕ Create New
+            </button>
+        </div>
+
+        <!-- Projects Browser Tab -->
+        <div id="projectsTab" class="projects-browser">
+            <div class="projects-header">
+                <h2>📁 My Projects</h2>
+                <div class="projects-actions">
+                    <button class="btn" onclick="refreshProjects()">
+                        🔄 Refresh
+                    </button>
+                    <button class="btn btn-secondary" onclick="showTab('create')">
+                        ➕ New Project
+                    </button>
+                </div>
+            </div>
+            
+            <div id="projectsGrid" class="projects-grid">
+                <!-- Projects will be loaded here -->
+            </div>
+            
+            <div id="projectsLoading" class="loading" style="display: none;">
+                <div class="spinner"></div>
+                <p>Loading projects...</p>
+            </div>
+            
+            <div id="projectsEmpty" class="empty-state" style="display: none;">
+                <h3>📁 No Projects Found</h3>
+                <p>You haven't created any projects yet. Click "Create New" to get started!</p>
+                <button class="btn" onclick="showTab('create')" style="margin-top: 20px;">
+                    ➕ Create Your First Project
+                </button>
+            </div>
+        </div>
+
+        <!-- Create New Project Tab -->
+        <div id="createTab" class="main-content" style="display: none;">
+            <!-- Workflow Selector -->
+            <div class="workflow-selector">
+                <div class="workflow-card selected" onclick="selectWorkflow('simple')">
+                    <h3>🚀 Quick Generation</h3>
+                    <p>One-click video creation<br>Content → Video</p>
+                </div>
+                <div class="workflow-card" onclick="selectWorkflow('advanced')">
+                    <h3>⚙️ Advanced Workflow</h3>
+                    <p>Step-by-step with editing<br>Content → Script → Edit → Video</p>
+                </div>
+            </div>
+
+            <div class="pipeline-steps" id="pipelineSteps">
+                <div class="step active" data-step="1">
+                    <div class="step-number">1</div>
+                    <span>Input Content</span>
+                </div>
+                <div class="step" data-step="2">
+                    <div class="step-number">2</div>
+                    <span>Edit Script</span>
+                </div>
+                <div class="step" data-step="3">
+                    <div class="step-number">3</div>
+                    <span>Generate Video</span>
+                </div>
+            </div>
+
+            <!-- Step 1: Content Input -->
+            <div class="section active" id="step1">
+                <h2 style="margin-bottom: 20px; color: #1976d2;">📝 Step 1: Input Your Educational Content</h2>
+                
+                <!-- Quick Actions for Simple Workflow -->
+                <div class="quick-actions" id="quickActions">
+                    <button class="quick-btn" onclick="generateCompleteVideo()">🎬 Generate Complete Video</button>
+                    <button class="quick-btn" onclick="generateScriptOnly()">📝 Generate Script Only</button>
+                </div>
+                
+                <div class="file-upload" onclick="document.getElementById('fileInput').click()">
+                    <input type="file" id="fileInput" accept=".md,.txt" onchange="handleFileUpload(event)">
+                    <div>
+                        <p style="font-size: 1.2em; margin-bottom: 10px;">📄 Upload Markdown File</p>
+                        <p style="color: #666;">Click here to upload a .md file or drag and drop</p>
+                    </div>
+                </div>
+
+                <div style="text-align: center; margin: 20px 0; color: #666; font-weight: 600;">OR</div>
+
+                <div class="input-area">
+                    <label for="contentInput">✏️ Enter your educational content in Markdown format:</label>
+                    <textarea 
+                        id="contentInput" 
+                        class="content-textarea" 
+                        placeholder="# Your Educational Content
+
+## Activity 2.1: Understanding Chemical Reactions
+
+* Collect the following solutions from the laboratory...
+* Test each solution with indicators...
+
+### Expected Observations:
+- Acids turn blue litmus red
+- Bases turn red litmus blue
+
+**Learning Objectives:**
+Students will understand the properties of acids and bases through hands-on experimentation."
+                    ></textarea>
+                </div>
+
+                <div style="text-align: center;" id="advancedActions">
+                    <button class="btn" onclick="generateScript()">
+                        🚀 Generate Script & Visuals
+                    </button>
+                </div>
+
+                <div class="progress-container" id="scriptProgress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="scriptProgressFill"></div>
+                    </div>
+                    <div class="progress-text" id="scriptProgressText">Generating script...</div>
+                </div>
+
+                <div class="status-message" id="scriptStatus"></div>
+            </div>
+
+            <!-- Step 2: Script Editor -->
+            <div class="section" id="step2">
+                <h2 style="margin-bottom: 20px; color: #1976d2;">✏️ Step 2: Review & Edit Script</h2>
+                
+                <div class="script-editor">
+                    <div class="slides-panel">
+                        <h3 style="margin-bottom: 15px;">📋 Lesson Steps</h3>
+                        <div id="slidesList">
+                            <!-- Slides will be populated here -->
+                        </div>
+                    </div>
+
+                    <div class="preview-panel">
+                        <h3 style="margin-bottom: 15px;">🖼️ Slide Preview</h3>
+                        <div class="slide-preview" id="slidePreview">
+                            <div class="preview-image" id="previewImage">
+                                <p style="color: #666;">Select a slide to see its preview</p>
+                            </div>
+                        </div>
+
+                        <div class="edit-controls" id="editControls" style="display: none;">
+                            <h4 style="margin-bottom: 10px;">✏️ Edit Content</h4>
+                            <textarea id="editTextarea" class="edit-textarea" placeholder="Edit the content for this slide..."></textarea>
+                            <button class="btn btn-secondary" onclick="saveSlideEdit()">💾 Save Changes</button>
+                            
+                            <div class="chat-window" id="chatWindow" style="display: none;">
+                                <div style="background: #f8f9fa; padding: 10px; border-bottom: 1px solid #ddd; border-radius: 10px 10px 0 0;">
+                                    <h4 style="margin: 0; color: #1976d2;">🤖 AI Visual Editor</h4>
+                                    <p style="margin: 5px 0 0 0; font-size: 0.9em; color: #666;">
+                                        Ask me to modify, improve, or create visual functions for this slide
+                                    </p>
+                                </div>
+                                
+                                <div id="chatMessages" style="max-height: 250px; overflow-y: auto; padding: 10px;">
+                                    <!-- Messages will be populated here -->
+                                </div>
+                                
+                                <div class="chat-input" style="border-top: 1px solid #ddd; padding-top: 10px;">
+                                    <div style="display: flex; gap: 10px;">
+                                        <input type="text" id="chatInput" 
+                                               placeholder="Describe how you want to modify the visual..." 
+                                               style="flex: 1; padding: 8px 12px; border: 1px solid #ddd; border-radius: 20px; outline: none;">
+                                        <button onclick="sendChatMessage()" 
+                                                style="padding: 8px 15px; border: none; background: #1976d2; color: white; border-radius: 20px; cursor: pointer;">
+                                            Send
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <button class="btn btn-warning" onclick="toggleChat()" style="margin-top: 10px;">
+                                🤖 Chat with AI
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Option 2: Two size options (if you want choice) -->
+                <div style="text-align: center; margin-top: 30px;">
+                    <button class="btn" onclick="goToStep(1)">← Back to Input</button>
+                    <button class="btn" onclick="downloadScriptPDFWithPreviews()" style="background: #3498db; margin-left: 15px;">
+                        📄 PDF (Standard)
+                    </button>
+                    <button class="btn" onclick="downloadScriptPDFWithPreviewsLarge()" style="background: #e74c3c; margin-left: 15px;">
+                        📄 PDF (Large)
+                    </button>
+                    <button class="btn btn-secondary" onclick="goToStep(3)" style="margin-left: 15px;">
+                        🎬 Generate Video →
+                    </button>
+                </div>
+            </div>
+
+            <!-- Step 3: Video Generation -->
+            <div class="section" id="step3">
+                <h2 style="margin-bottom: 20px; color: #1976d2;">🎬 Step 3: Generate Your Video</h2>
+                
+                <div style="text-align: center; padding: 40px;">
+                    <p style="font-size: 1.2em; margin-bottom: 30px; color: #666;">
+                        Ready to create your educational video? This process will generate audio narration and combine it with your visuals.
+                    </p>
+                    
+                    <button class="btn" id="generateVideoBtn" onclick="generateVideo()">
+                        🎥 Generate Final Video
+                    </button>
+                </div>
+
+                <div class="progress-container" id="videoProgress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="videoProgressFill"></div>
+                    </div>
+                    <div class="progress-text" id="videoProgressText">Generating video...</div>
+                </div>
+
+                <div class="status-message" id="videoStatus"></div>
+
+                <div class="video-result" id="videoResult" style="display: none;">
+                    <h3 style="color: #4caf50; margin-bottom: 20px;">🎉 Video Generated Successfully!</h3>
+                    <div class="video-player">
+                        <video id="generatedVideo" controls>
+                            Your browser does not support the video tag.
+                        </video>
+                    </div>
+                    
+                    <div class="download-section">
+                        <h4 style="margin-bottom: 15px;">📥 Download Options</h4>
+                        <button class="btn" onclick="downloadVideo()">
+                            ⬇️ Download Video
+                        </button>
+                        <button class="btn" onclick="downloadPDF()" style="margin-left: 15px; background: #e74c3c;">
+                            📄 Download PDF Report
+                        </button>
+                        <button class="btn btn-secondary" onclick="startNew()" style="margin-left: 15px;">
+                            🆕 Create New Video
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Project Details Modal -->
+        <div id="projectModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>📁 Project Details</h3>
+                    <button class="close-btn" onclick="closeModal()">&times;</button>
+                </div>
+                <div id="modalContent">
+                    <!-- Project details will be loaded here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Delete Confirmation Modal -->
+        <div id="deleteModal" class="modal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h3>🗑️ Confirm Delete</h3>
+                    <button class="close-btn" onclick="closeDeleteModal()">&times;</button>
+                </div>
+                <div style="padding: 20px 0;">
+                    <p>Are you sure you want to delete this project?</p>
+                    <p style="color: #f44336; font-weight: 600; margin-top: 10px;">This action cannot be undone.</p>
+                </div>
+                <div style="text-align: center; margin-top: 20px;">
+                    <button class="btn" onclick="closeDeleteModal()">Cancel</button>
+                    <button class="btn" style="background: #f44336; margin-left: 15px;" onclick="confirmDelete()">
+                        🗑️ Delete Project
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Replace your script loading section at the bottom of index.html with this order: -->
+    <!-- PDF Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- IMPORTANT: Load AI chat FIRST to override any old functions -->
+    <script src="js/ai-chat.js"></script>
+    <!-- Then load other modules -->
+    <script src="js/pdf-export.js"></script>
+    <script src="js/core.js"></script>
+    <script src="js/workflow.js"></script>
+    <script src="js/projects.js"></script>
+    <script src="js/video-generation.js"></script>
+    <!-- Main application script continues here... -->
+    <script>
+        // Your main application code here
+        // Make sure there are NO old sendChatMessage or toggleChat functions here
+        
+        // Rest of your existing code...
+    </script>
+
+<script>
+// Force override any old functions
+window.toggleChat = function() {
+    console.log('🤖 Using new AI chat toggle');
+    const chatWindow = document.getElementById('chatWindow');
+    if (!chatWindow) return;
+    
+    const isVisible = chatWindow.style.display !== 'none';
+    
+    if (isVisible) {
+        chatWindow.style.display = 'none';
+    } else {
+        chatWindow.style.display = 'block';
+        if (window.aiChat && typeof window.aiChat.initializeChat === 'function') {
+            window.aiChat.initializeChat();
+        }
+    }
+};
+
+window.sendChatMessage = function() {
+    console.log('🤖 Using new AI chat send');
+    if (window.aiChat && typeof window.aiChat.sendMessage === 'function') {
+        window.aiChat.sendMessage();
+    }
+};
+
+// REPLACE the existing selectSlide function with this:
+function selectSlide(index) {
+    // Update active slide
+    document.querySelectorAll('.slide-item').forEach((item, i) => {
+        if (i === index) {
+            item.classList.add('active');
+        } else {
+            item.classList.remove('active');
+        }
+    });
+    
+    currentSlideIndex = index;
+    const slide = slides[index];
+    
+    // Update preview
+    updateSlidePreview(slide, index);
+    
+    // Update edit controls
+    const editControls = document.getElementById('editControls');
+    const editTextarea = document.getElementById('editTextarea');
+    
+    editControls.style.display = 'block';
+    editTextarea.value = JSON.stringify(slide, null, 2);
+    
+    // CLEAR CHAT CONTEXT when switching slides
+    clearChatContext();
+}
+
+// NEW: Clear chat context function
+function clearChatContext() {
+    const chatMessages = document.getElementById('chatMessages');
+    const chatWindow = document.getElementById('chatWindow');
+    
+    // Clear all messages
+    if (chatMessages) {
+        chatMessages.innerHTML = '';
+    }
+    
+    // Hide chat window
+    if (chatWindow) {
+        chatWindow.style.display = 'none';
+    }
+    
+    console.log('🧹 Chat context cleared for new slide');
+}
+
+// REPLACE the existing sendChatMessage function with this:
+async function sendChatMessage() {
+    const chatInput = document.getElementById('chatInput');
+    const message = chatInput.value.trim();
+    if (!message) return;
+    
+    const chatMessages = document.getElementById('chatMessages');
+    const currentSlide = slides[currentSlideIndex];
+    
+    // Add user message
+    const userMsg = document.createElement('div');
+    userMsg.className = 'chat-message user';
+    userMsg.textContent = message;
+    chatMessages.appendChild(userMsg);
+    
+    // Clear input
+    chatInput.value = '';
+    
+    // Show loading message
+    const loadingMsg = document.createElement('div');
+    loadingMsg.className = 'chat-message assistant';
+    loadingMsg.textContent = '🤖 Thinking...';
+    chatMessages.appendChild(loadingMsg);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+    
+    try {
+        // Get current visual function code
+        let currentVisualCode = '';
+        if (currentSlide.visual && currentSlide.visual.type && currentVisualFunctions[currentSlide.visual.type]) {
+            currentVisualCode = currentVisualFunctions[currentSlide.visual.type].toString();
+        }
+        
+        // Call AI edit API
+        const response = await fetch('/api/edit-visual', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                projectId: currentProject.projectId,
+                slideIndex: currentSlideIndex,
+                prompt: message,
+                currentVisualCode: currentVisualCode
+            })
+        });
+        
+        const result = await response.json();
+        
+        // Remove loading message
+        chatMessages.removeChild(loadingMsg);
+        
+        if (result.success) {
+            // Show AI response
+            const aiMsg = document.createElement('div');
+            aiMsg.className = 'chat-message assistant';
+            aiMsg.innerHTML = `
+                ✅ Visual updated! 
+                <button onclick="saveAIEdit('${currentSlide.visual.type}', \`${result.updatedCode.replace(/`/g, '\\`')}\`)" 
+                        style="margin-left: 10px; padding: 4px 8px; background: #4caf50; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                    💾 Save Changes
+                </button>
+            `;
+            chatMessages.appendChild(aiMsg);
+            
+            // Update the visual function in memory (temporary preview)
+            try {
+                const newFunction = new Function('ctx', 'param1', 'param2', 'param3', 
+                    result.updatedCode.replace(/^function\s+\w+\s*\([^)]*\)\s*\{/, '').replace(/\}$/, '')
+                );
+                currentVisualFunctions[currentSlide.visual.type] = newFunction;
+                
+                // Refresh preview
+                updateSlidePreview(currentSlide, currentSlideIndex);
+                
+            } catch (error) {
+                console.error('Error applying temporary visual update:', error);
+            }
+            
+        } else {
+            const errorMsg = document.createElement('div');
+            errorMsg.className = 'chat-message assistant';
+            errorMsg.textContent = `❌ Error: ${result.error}`;
+            chatMessages.appendChild(errorMsg);
+        }
+        
+    } catch (error) {
+        // Remove loading message
+        chatMessages.removeChild(loadingMsg);
+        
+        const errorMsg = document.createElement('div');
+        errorMsg.className = 'chat-message assistant';
+        errorMsg.textContent = `❌ Error: ${error.message}`;
+        chatMessages.appendChild(errorMsg);
+    }
+    
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+}
+
+// NEW: Save AI edit function
+async function saveAIEdit(functionName, functionCode) {
+    try {
+        const response = await fetch(`/api/project/${currentProject.projectId}/visual-function`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                functionName: functionName,
+                functionCode: functionCode
+            })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            showStatus('scriptStatus', '✅ Visual function saved successfully!', 'success');
+            
+            // Update the function permanently in memory
+            try {
+                const newFunction = new Function('ctx', 'param1', 'param2', 'param3', 
+                    functionCode.replace(/^function\s+\w+\s*\([^)]*\)\s*\{/, '').replace(/\}$/, '')
+                );
+                currentVisualFunctions[functionName] = newFunction;
+                
+                // Refresh preview
+                updateSlidePreview(slides[currentSlideIndex], currentSlideIndex);
+                
+            } catch (error) {
+                console.error('Error updating function in memory:', error);
+            }
+            
+            setTimeout(() => hideStatus('scriptStatus'), 3000);
+        } else {
+            showStatus('scriptStatus', `❌ Error saving: ${result.error}`, 'error');
+        }
+        
+    } catch (error) {
+        console.error('Error saving AI edit:', error);
+        showStatus('scriptStatus', `❌ Error saving: ${error.message}`, 'error');
+    }
+}
+
+// REPLACE the existing toggleChat function with this:
+function toggleChat() {
+    const chatWindow = document.getElementById('chatWindow');
+    const isVisible = chatWindow.style.display !== 'none';
+    
+    if (isVisible) {
+        chatWindow.style.display = 'none';
+    } else {
+        // Clear context when opening chat for current slide
+        clearChatContext();
+        chatWindow.style.display = 'block';
+        
+        // Add welcome message with slide context
+        const chatMessages = document.getElementById('chatMessages');
+        const welcomeMsg = document.createElement('div');
+        welcomeMsg.className = 'chat-message assistant';
+        const currentSlide = slides[currentSlideIndex];
+        welcomeMsg.textContent = `🤖 Hi! I'm ready to help edit the visual for "${currentSlide.title}". What would you like to change?`;
+        chatMessages.appendChild(welcomeMsg);
+    }
+}
+
+
+</script>
+</body>
+</html>

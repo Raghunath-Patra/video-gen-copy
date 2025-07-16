@@ -1,0 +1,9 @@
+node main_pipeline.js script input/chemistry/section213.md
+node visual_preview_tool.js "/Users/rajshekhar.bhat/dynamic-video-generator/output/chemistry/section213/generated_script.js"
+node optimized_video_generator.js output/chemistry/test/generated_script.js
+
+
+
+
+
+
