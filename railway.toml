@@ -1,6 +1,7 @@
 # railway.toml - Railway deployment configuration
 [build]
-  builder = "nixpacks"
+  builder = "dockerfile"
+  dockerfilePath = "Dockerfile"  # or "docker/Dockerfile.production"
   buildCommand = "npm ci && npm run build:production"
 
 [deploy]
