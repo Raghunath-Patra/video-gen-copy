@@ -1,4 +1,4 @@
-// production_server.js - Production-ready video generator service for Railway + Supabase
+// production_server.js - Fixed production-ready video generator service
 require('dotenv').config();
 
 const express = require('express');
@@ -8,13 +8,16 @@ const fs = require('fs').promises;
 const { existsSync } = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 // Import your existing modules
-const EnhancedContentGenerator = require('./content_generator');
-const VisualPreviewGenerator = require('./visual_preview_tool');
-const FixedOptimizedVideoGenerator = require('./optimized_video_generator');
-const monitoring = require('./utils/monitoring');
+const EnhancedContentGenerator = require('./scripts/content_generator');
+const VisualPreviewGenerator = require('./scripts/visual_preview_tool');
+const FixedOptimizedVideoGenerator = require('./scripts/optimized_video_generator');
+const Monitoring = require('./utils/monitoring');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -40,34 +43,33 @@ const limiter = rateLimit({
 app.use('/api/', limiter);
 
 // Monitoring middleware
-app.use(monitoring.requestMiddleware());
+app.use(Monitoring.requestMiddleware());
 
 // Initialize Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // Use service role key for server-side operations
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 // Middleware
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000', 'https://your-frontend-domain.com'],
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'],
   credentials: true
 }));
 app.use(express.json({ limit: '50mb' }));
 app.use(express.static('public'));
 
-// Configure multer for file uploads (with Railway-compatible storage)
+// Configure multer for file uploads
 const upload = multer({
-  dest: '/tmp/uploads/', // Use /tmp for Railway
+  dest: '/tmp/uploads/',
   limits: {
     fileSize: 10 * 1024 * 1024 // 10MB limit
   }
 });
 
-// Middleware to extract user info from forwarded request
+// Middleware to extract user info
 const extractUserInfo = (req, res, next) => {
   try {
-    // Extract user info from headers set by your main backend service
     const userId = req.headers['x-user-id'];
     const userEmail = req.headers['x-user-email'];
     const authToken = req.headers['authorization'];
@@ -138,69 +140,56 @@ class DatabaseService {
   
   static async saveProjectScript(projectId, userId, lessonSteps, speakers, visualFunctions) {
     try {
-      // Start a transaction-like operation
-      const operations = [];
-      
       // Save speakers
       for (const [key, speaker] of Object.entries(speakers)) {
-        operations.push(
-          supabase
-            .from('speakers')
-            .upsert([{
-              project_id: projectId,
-              speaker_key: key,
-              voice: speaker.voice,
-              model: speaker.model,
-              name: speaker.name,
-              color: speaker.color,
-              gender: speaker.gender
-            }], { onConflict: 'project_id,speaker_key' })
-        );
+        await supabase
+          .from('speakers')
+          .upsert([{
+            project_id: projectId,
+            speaker_key: key,
+            voice: speaker.voice,
+            model: speaker.model,
+            name: speaker.name,
+            color: speaker.color,
+            gender: speaker.gender
+          }], { onConflict: 'project_id,speaker_key' });
       }
       
       // Save visual functions
       for (const [name, func] of Object.entries(visualFunctions)) {
-        operations.push(
-          supabase
-            .from('visual_functions')
-            .upsert([{
-              project_id: projectId,
-              function_name: name,
-              function_code: func.toString()
-            }], { onConflict: 'project_id,function_name' })
-        );
+        await supabase
+          .from('visual_functions')
+          .upsert([{
+            project_id: projectId,
+            function_name: name,
+            function_code: func.toString()
+          }], { onConflict: 'project_id,function_name' });
       }
       
-      // Delete existing lesson steps for this project
+      // Delete existing lesson steps
       await supabase
         .from('lesson_steps')
         .delete()
         .eq('project_id', projectId);
       
       // Save lesson steps
-      for (let i = 0; i < lessonSteps.length; i++) {
-        const step = lessonSteps[i];
-        operations.push(
-          supabase
-            .from('lesson_steps')
-            .insert([{
-              project_id: projectId,
-              step_order: i + 1,
-              speaker: step.speaker,
-              title: step.title,
-              content: step.content,
-              content2: step.content2,
-              narration: step.narration,
-              visual_duration: step.visualDuration || 4.0,
-              is_complex: step.isComplex || false,
-              visual_type: step.visual?.type,
-              visual_params: step.visual?.params || null
-            }])
-        );
-      }
+      const stepInserts = lessonSteps.map((step, i) => ({
+        project_id: projectId,
+        step_order: i + 1,
+        speaker: step.speaker,
+        title: step.title,
+        content: step.content,
+        content2: step.content2,
+        narration: step.narration,
+        visual_duration: step.visualDuration || 4.0,
+        is_complex: step.isComplex || false,
+        visual_type: step.visual?.type,
+        visual_params: step.visual?.params || null
+      }));
       
-      // Execute all operations
-      await Promise.all(operations);
+      await supabase
+        .from('lesson_steps')
+        .insert(stepInserts);
       
       // Update project status
       await this.updateProjectStatus(projectId, 'script_ready', userId);
@@ -224,45 +213,20 @@ class DatabaseService {
       if (projectError) throw projectError;
       if (!project) return null;
       
-      // Get speakers
-      const { data: speakers, error: speakersError } = await supabase
-        .from('speakers')
-        .select('*')
-        .eq('project_id', projectId);
-      
-      if (speakersError) throw speakersError;
-      
-      // Get visual functions
-      const { data: visualFunctions, error: visualError } = await supabase
-        .from('visual_functions')
-        .select('*')
-        .eq('project_id', projectId);
-      
-      if (visualError) throw visualError;
-      
-      // Get lesson steps
-      const { data: lessonSteps, error: stepsError } = await supabase
-        .from('lesson_steps')
-        .select('*')
-        .eq('project_id', projectId)
-        .order('step_order');
-      
-      if (stepsError) throw stepsError;
-      
-      // Get videos
-      const { data: videos, error: videosError } = await supabase
-        .from('videos')
-        .select('*')
-        .eq('project_id', projectId);
-      
-      if (videosError) throw videosError;
+      // Get related data
+      const [speakers, visualFunctions, lessonSteps, videos] = await Promise.all([
+        supabase.from('speakers').select('*').eq('project_id', projectId),
+        supabase.from('visual_functions').select('*').eq('project_id', projectId),
+        supabase.from('lesson_steps').select('*').eq('project_id', projectId).order('step_order'),
+        supabase.from('videos').select('*').eq('project_id', projectId)
+      ]);
       
       return {
         project,
-        speakers: speakers || [],
-        visualFunctions: visualFunctions || [],
-        lessonSteps: lessonSteps || [],
-        videos: videos || []
+        speakers: speakers.data || [],
+        visualFunctions: visualFunctions.data || [],
+        lessonSteps: lessonSteps.data || [],
+        videos: videos.data || []
       };
     } catch (error) {
       console.error('❌ Database error getting project:', error);
@@ -311,7 +275,6 @@ class DatabaseService {
       
       if (error) throw error;
       
-      // Update project status to completed
       await this.updateProjectStatus(projectId, 'completed', userId);
       
       return data;
@@ -323,7 +286,6 @@ class DatabaseService {
   
   static async deleteProject(projectId, userId) {
     try {
-      // Delete project (cascade will handle related records)
       const { error } = await supabase
         .from('projects')
         .delete()
@@ -339,23 +301,10 @@ class DatabaseService {
   }
 }
 
-// Ensure required directories exist (Railway-compatible)
-async function initializeDirectories() {
-  const dirs = ['/tmp/uploads', '/tmp/temp', '/tmp/output'];
-  for (const dir of dirs) {
-    try {
-      await fs.mkdir(dir, { recursive: true });
-    } catch (error) {
-      console.error(`Error creating directory ${dir}:`, error);
-    }
-  }
-}
-
 // Convert database records back to script format
 function convertDatabaseToScript(projectData) {
   const { speakers, visualFunctions, lessonSteps } = projectData;
   
-  // Convert speakers array to object
   const speakersObj = {};
   speakers.forEach(speaker => {
     speakersObj[speaker.speaker_key] = {
@@ -367,18 +316,15 @@ function convertDatabaseToScript(projectData) {
     };
   });
   
-  // Convert visual functions array to object
   const visualFunctionsObj = {};
   visualFunctions.forEach(vf => {
     try {
-      // Reconstruct function from string
       visualFunctionsObj[vf.function_name] = eval(`(${vf.function_code})`);
     } catch (error) {
       console.error(`Error reconstructing function ${vf.function_name}:`, error);
     }
   });
   
-  // Convert lesson steps
   const lessonStepsArray = lessonSteps.map(step => ({
     speaker: step.speaker,
     title: step.title,
@@ -402,11 +348,10 @@ function convertDatabaseToScript(projectData) {
   };
 }
 
-// Create temporary script file for video generation
+// Create temporary script file
 async function createTempScriptFile(projectData) {
   const scriptContent = convertDatabaseToScript(projectData);
   const scriptCode = `
-// Generated script from database
 const LESSON_CONTENT = ${JSON.stringify(scriptContent.LESSON_CONTENT, null, 2)};
 
 ${Object.entries(scriptContent.visualFunctions).map(([name, func]) => 
@@ -425,11 +370,23 @@ module.exports = {
   return tempScriptPath;
 }
 
+// Ensure required directories exist
+async function initializeDirectories() {
+  const dirs = ['/tmp/uploads', '/tmp/temp', '/tmp/output'];
+  for (const dir of dirs) {
+    try {
+      await fs.mkdir(dir, { recursive: true });
+    } catch (error) {
+      console.error(`Error creating directory ${dir}:`, error);
+    }
+  }
+}
+
 // API Routes
 
-// Health check with detailed monitoring
+// Health check
 app.get('/health', (req, res) => {
-  const healthStatus = monitoring.getHealthStatus();
+  const healthStatus = Monitoring.getHealthStatus();
   
   res.status(healthStatus.status === 'healthy' ? 200 : 503).json({
     success: healthStatus.status === 'healthy',
@@ -438,26 +395,10 @@ app.get('/health', (req, res) => {
     version: '2.0.0',
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString(),
-    uptime: healthStatus.metrics.uptime,
-    database: 'connected', // Will be updated by database check
+    database: process.env.SUPABASE_URL ? 'configured' : 'not configured',
     issues: healthStatus.issues,
     metrics: healthStatus.metrics
   });
-});
-
-// Metrics endpoint for monitoring systems
-app.get('/metrics', (req, res) => {
-  const metrics = monitoring.getMetricsForExport();
-  
-  // Prometheus-style metrics format
-  let output = '';
-  Object.entries(metrics).forEach(([key, value]) => {
-    output += `# TYPE ${key} gauge\n`;
-    output += `${key} ${value}\n`;
-  });
-  
-  res.set('Content-Type', 'text/plain');
-  res.send(output);
 });
 
 // Get user projects
@@ -488,34 +429,7 @@ app.get('/api/projects', extractUserInfo, async (req, res) => {
   }
 });
 
-// Get specific project
-app.get('/api/project/:projectId', extractUserInfo, async (req, res) => {
-  try {
-    const { projectId } = req.params;
-    
-    const projectData = await DatabaseService.getProject(projectId, req.user.id);
-    
-    if (!projectData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Project not found'
-      });
-    }
-    
-    res.json({
-      success: true,
-      project: projectData
-    });
-  } catch (error) {
-    console.error('❌ Error getting project:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Failed to get project'
-    });
-  }
-});
-
-// Create new project and generate script
+// Create project and generate script
 app.post('/api/generate-script', extractUserInfo, async (req, res) => {
   try {
     const { content, title } = req.body;
@@ -528,7 +442,7 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
     }
     
     console.log('🚀 Starting script generation for user:', req.user.id);
-    monitoring.info('Script generation started', {
+    Monitoring.info('Script generation started', {
       userId: req.user.id,
       contentLength: content.length,
       title: title || 'Untitled Project'
@@ -541,11 +455,9 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
       content
     );
     
-    // Generate script using your existing content generator
+    // Generate script
     const contentGenerator = new EnhancedContentGenerator();
     const jsContent = await contentGenerator.generateDynamicContent(content);
-    
-    // Parse the content to get lesson steps and speakers
     const parsedContent = contentGenerator.parseGeneratedContent(jsContent);
     
     // Save to database
@@ -558,7 +470,7 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
     );
     
     console.log(`✅ Script generated for project: ${project.id}`);
-    monitoring.trackScriptGeneration(project.id, req.user.id, parsedContent.lessonSteps.length);
+    Monitoring.trackScriptGeneration(project.id, req.user.id, parsedContent.lessonSteps.length);
     
     res.json({
       success: true,
@@ -574,9 +486,9 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
     });
   } catch (error) {
     console.error('❌ Error generating script:', error);
-    monitoring.error('Script generation failed', error, {
+    Monitoring.error('Script generation failed', error, {
       userId: req.user.id,
-      contentLength: content?.length || 0
+      contentLength: req.body.content?.length || 0
     });
     res.status(500).json({
       success: false,
@@ -620,7 +532,7 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
     const tempScriptPath = await createTempScriptFile(projectData);
     
     try {
-      // Generate video with optimized generator
+      // Generate video
       const videoOutputDir = `/tmp/output/${projectId}`;
       const videoName = `video_${Date.now()}`;
       
@@ -633,11 +545,9 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
       const videoPath = await generator.generate();
       
       console.log(`✅ Video generation complete: ${videoPath}`);
-      monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
       
-      // Get video duration
-      const videoStats = await fs.stat(videoPath);
-      const videoDuration = 30; // You might want to get actual duration using ffprobe
+      // Get video duration (simplified - you might want to use ffprobe)
+      const videoDuration = 30; // Default duration
       
       // Save video info to database
       await DatabaseService.saveVideo(
@@ -646,6 +556,8 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
         videoPath,
         videoDuration
       );
+      
+      Monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
       
       res.json({
         success: true,
@@ -666,9 +578,9 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
     
   } catch (error) {
     console.error('❌ Error in video generation:', error);
-    monitoring.error('Video generation failed', error, {
+    Monitoring.error('Video generation failed', error, {
       userId: req.user.id,
-      projectId: projectId
+      projectId: req.body.projectId
     });
     res.status(500).json({
       success: false,
@@ -694,7 +606,7 @@ app.get('/api/video/:projectId', extractUserInfo, async (req, res) => {
       });
     }
     
-    const video = projectData.videos[0]; // Get the first video
+    const video = projectData.videos[0];
     const videoPath = video.file_path;
     
     if (!videoPath || !existsSync(videoPath)) {
@@ -751,43 +663,6 @@ app.get('/api/video/:projectId', extractUserInfo, async (req, res) => {
   }
 });
 
-// Download video
-app.get('/api/download/:projectId', extractUserInfo, async (req, res) => {
-  try {
-    const { projectId } = req.params;
-    
-    const projectData = await DatabaseService.getProject(projectId, req.user.id);
-    
-    if (!projectData || !projectData.videos || projectData.videos.length === 0) {
-      return res.status(404).send('Video not found');
-    }
-    
-    const video = projectData.videos[0];
-    const videoPath = video.file_path;
-    
-    if (!videoPath || !existsSync(videoPath)) {
-      return res.status(404).send('Video file not found');
-    }
-    
-    const downloadFilename = `${projectData.project.title.replace(/[^a-zA-Z0-9]/g, '_')}_video.mp4`;
-    
-    res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
-    res.setHeader('Content-Type', 'video/mp4');
-    
-    const fileStream = require('fs').createReadStream(videoPath);
-    fileStream.pipe(res);
-    
-    fileStream.on('error', (error) => {
-      console.error('❌ Error during download:', error);
-      res.status(500).send('Error downloading video');
-    });
-    
-  } catch (error) {
-    console.error('❌ Error in download endpoint:', error);
-    res.status(500).send('Error downloading video');
-  }
-});
-
 // Delete project
 app.delete('/api/project/:projectId', extractUserInfo, async (req, res) => {
   try {
@@ -827,10 +702,10 @@ app.delete('/api/project/:projectId', extractUserInfo, async (req, res) => {
 });
 
 // Error handling middleware
-app.use(monitoring.errorMiddleware());
+app.use(Monitoring.errorMiddleware());
 
 app.use((error, req, res, next) => {
-  monitoring.error('Unhandled application error', error, {
+  Monitoring.error('Unhandled application error', error, {
     method: req.method,
     url: req.url,
     userId: req.user?.id
@@ -863,7 +738,7 @@ async function startServer() {
       console.log(`🔑 Auth: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Configured' : 'Missing'}`);
       console.log(`🎬 Video generation service ready for production!`);
       
-      // Log environment variables status
+      // Environment check
       console.log('\n📋 Environment Check:');
       console.log(`   SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
       console.log(`   SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing'}`);
