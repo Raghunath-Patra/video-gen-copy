@@ -8,13 +8,46 @@ const fs = require('fs').promises;
 const { existsSync } = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const cors = require('cors');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 
 // Import your existing modules
 const EnhancedContentGenerator = require('./content_generator');
 const VisualPreviewGenerator = require('./visual_preview_tool');
 const FixedOptimizedVideoGenerator = require('./optimized_video_generator');
-const monitoring = require('./utils/monitoring');
+
+// Simple monitoring module (since it's not in the files)
+const monitoring = {
+  requestMiddleware: () => (req, res, next) => {
+    req.startTime = Date.now();
+    next();
+  },
+  getHealthStatus: () => ({
+    status: 'healthy',
+    metrics: {
+      uptime: process.uptime(),
+      memoryUsage: process.memoryUsage(),
+      timestamp: new Date().toISOString()
+    },
+    issues: []
+  }),
+  getMetricsForExport: () => ({
+    uptime_seconds: process.uptime(),
+    memory_usage_mb: process.memoryUsage().heapUsed / 1024 / 1024
+  }),
+  errorMiddleware: () => (err, req, res, next) => {
+    console.error('Error:', err);
+    next(err);
+  },
+  info: (msg, data) => console.log(`INFO: ${msg}`, data || ''),
+  error: (msg, err, data) => console.error(`ERROR: ${msg}`, err, data || ''),
+  trackScriptGeneration: (projectId, userId, steps) => 
+    console.log(`Script generated: ${projectId} for ${userId} with ${steps} steps`),
+  trackVideoGeneration: (projectId, userId, duration) => 
+    console.log(`Video generated: ${projectId} for ${userId}, duration: ${duration}s`)
+};
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -633,11 +666,12 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
       const videoPath = await generator.generate();
       
       console.log(`✅ Video generation complete: ${videoPath}`);
-      monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
       
       // Get video duration
       const videoStats = await fs.stat(videoPath);
       const videoDuration = 30; // You might want to get actual duration using ffprobe
+      
+      monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
       
       // Save video info to database
       await DatabaseService.saveVideo(

@@ -2,21 +2,20 @@
   "name": "video-generator-service",
   "version": "2.0.0",
   "description": "Production-ready educational video generation service with Supabase integration",
-  "main": "production_server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node production_server.js",
-    "start:production": "NODE_ENV=production node production_server.js",
-    "start:dev": "NODE_ENV=development nodemon production_server.js",
+    "start": "node index.js",
+    "start:production": "NODE_ENV=production node index.js",
+    "start:dev": "NODE_ENV=development nodemon index.js",
+    "start:legacy": "USE_LEGACY_SERVER=true node index.js",
     "build:production": "echo 'No build step required for Node.js service'",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "lint": "eslint *.js --fix",
     "health-check": "curl -f http://localhost:${PORT:-3000}/health || exit 1",
-    "migrate": "node scripts/migrate.js",
-    "seed": "node scripts/seed.js",
-    "logs": "railway logs --follow",
-    "deploy": "railway deploy",
-    "db:reset": "node scripts/reset-db.js"
+    "migrate": "node scripts/database-utils.js migrate",
+    "cleanup": "node scripts/database-utils.js cleanup",
+    "db:health": "node scripts/database-utils.js health"
   },
   "engines": {
     "node": ">=18.0.0",
@@ -25,7 +24,6 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.3",
     "@supabase/supabase-js": "^2.39.0",
-    "body-parser": "^2.2.0",
     "canvas": "^2.11.2",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
@@ -58,13 +56,5 @@
     "microservice"
   ],
   "author": "Educational Video Generator Team",
-  "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/your-repo/video-generator-service.git"
-  },
-  "homepage": "https://github.com/your-repo/video-generator-service#readme",
-  "bugs": {
-    "url": "https://github.com/your-repo/video-generator-service/issues"
-  }
+  "license": "MIT"
 }

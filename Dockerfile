@@ -21,11 +21,13 @@ RUN apt-get update && apt-get install -y \
 # Create app user for security
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 
-# Copy package files
-COPY package*.json ./
+# Copy the correct package files
+COPY package.json ./
+# If you have package-lock.json, copy it too
+COPY package-lock.json* ./
 
-# Install dependencies
-RUN npm ci --only=production && npm cache clean --force
+# Install dependencies (use --omit=dev instead of --only=production)
+RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy application code
 COPY . .
