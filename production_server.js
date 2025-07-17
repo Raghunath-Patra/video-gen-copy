@@ -18,6 +18,8 @@ const fetch = require('node-fetch'); // Add this dependency
 const EnhancedContentGenerator = require('./content_generator');
 const VisualPreviewGenerator = require('./visual_preview_tool');
 const FixedOptimizedVideoGenerator = require('./optimized_video_generator');
+// Add this with your other imports
+const { TmpCleaner, createCleanupMiddleware } = require('./tmp_cleaner');
 
 // Simple monitoring module
 const monitoring = {
@@ -53,6 +55,8 @@ const monitoring = {
 const app = express();
 app.set('trust proxy', 1);
 const PORT = process.env.PORT || 3000;
+const tmpCleaner = new TmpCleaner();
+const cleanupMiddleware = createCleanupMiddleware();
 
 // Security and performance middleware
 app.use(helmet({
@@ -678,28 +682,28 @@ app.get('/api/project/:projectId', authenticateService, extractUserInfo, async (
 app.post('/api/generate-script', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { content, title } = req.body;
-    
+
     if (!content || content.trim().length === 0) {
       return res.status(400).json({
         success: false,
         error: 'Content is required'
       });
     }
-    
+
     console.log('🚀 Starting script generation for user:', req.user.id);
-    
+
     // Create project
     const project = await DatabaseService.createProject(
       req.user.id,
       title || 'Untitled Project',
       content
     );
-    
+
     // Generate script
     const contentGenerator = new EnhancedContentGenerator();
     const jsContent = await contentGenerator.generateDynamicContent(content);
     const parsedContent = contentGenerator.parseGeneratedContent(jsContent);
-    
+
     // Save to database
     await DatabaseService.saveProjectScript(
       project.id,
@@ -708,10 +712,10 @@ app.post('/api/generate-script', authenticateService, extractUserInfo, async (re
       parsedContent.speakers,
       parsedContent.visualFunctions
     );
-    
+
     console.log(`✅ Script generated for project: ${project.id}`);
     monitoring.trackScriptGeneration(project.id, req.user.id, parsedContent.lessonSteps.length);
-    
+
     res.json({
       success: true,
       project: {
@@ -731,6 +735,13 @@ app.post('/api/generate-script', authenticateService, extractUserInfo, async (re
       success: false,
       error: error.message || 'Failed to generate script'
     });
+  } finally {
+    try {
+      await tmpCleaner.clearAll();
+      console.log('✅ /tmp cleanup completed');
+    } catch (cleanupError) {
+      console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
+    }
   }
 });
 
@@ -768,10 +779,11 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
     // Create temporary script file
     const tempScriptPath = await createTempScriptFile(projectData);
     let tempVideoPath = null;
+    const videoOutputDir = `/tmp/output/${projectId}`;
     
     try {
       // Generate video
-      const videoOutputDir = `/tmp/output/${projectId}`;
+      //const videoOutputDir = `/tmp/output/${projectId}`;
       await fs.mkdir(videoOutputDir, { recursive: true });
       
       const videoName = `video_${Date.now()}`;
@@ -819,30 +831,13 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
       });
       
     } finally {
-      // Clean up temporary files
-      // Clean up ALL temporary files and directories
       try {
-        const cleanupPaths = [
-          tempScriptPath,
-          tempVideoPath,
-          videoOutputDir  // This will recursively delete the entire output structure
-        ];
-        
-        for (const cleanupPath of cleanupPaths) {
-          if (cleanupPath && existsSync(cleanupPath)) {
-            const stats = await fs.stat(cleanupPath);
-            if (stats.isDirectory()) {
-              await fs.rm(cleanupPath, { recursive: true, force: true });
-            } else {
-              await fs.unlink(cleanupPath);
-            }
-          }
-        }
+        await tmpCleaner.clearAll();
+        console.log('✅ /tmp cleanup completed');
       } catch (cleanupError) {
-        console.warn('Warning: Could not delete temp files:', cleanupError.message);
+        console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
       }
     }
-    
   } catch (error) {
     console.error('❌ Error in video generation:', error);
     monitoring.error('Video generation failed', error, { userId: req.user.id });
@@ -1143,6 +1138,13 @@ app.get('/api/audio/:audioId', authenticateService, extractUserInfo, async (req,
   }
 });
 
+// Manual cleanup endpoint
+app.post('/api/cleanup', authenticateService, cleanupMiddleware.cleanupEndpoint);
+
+// Cleanup stats endpoint
+app.get('/api/cleanup/stats', authenticateService, cleanupMiddleware.statsEndpoint);
+
+
 // Error handling middleware
 app.use(monitoring.errorMiddleware());
 
@@ -1215,8 +1217,15 @@ async function startServer() {
 }
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down server gracefully...');
+// Cleanup on server shutdown
+process.on('SIGINT', async () => {
+  console.log('\n🛑 Server shutting down, cleaning up...');
+  try {
+    await tmpCleaner.clearAll();
+    console.log('✅ Final cleanup completed');
+  } catch (error) {
+    console.error('❌ Final cleanup failed:', error);
+  }
   process.exit(0);
 });
 
@@ -1225,4 +1234,13 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 
+// Start periodic cleanup every 30 minutes
+setInterval(async () => {
+  try {
+    await tmpCleaner.clearAll();
+    console.log('⏰ Periodic cleanup completed');
+  } catch (error) {
+    console.error('❌ Periodic cleanup failed:', error);
+  }
+}, 60 * 60 * 1000); // Every 60 minutes
 startServer();
