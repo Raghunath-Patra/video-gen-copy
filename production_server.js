@@ -98,26 +98,91 @@ const upload = multer({
 });
 
 // Middleware to extract user info from forwarded request
+// Replace the existing extractUserInfo middleware in production_server.js
+
+// Service authentication middleware
+const authenticateService = (req, res, next) => {
+  try {
+    const serviceKey = req.headers['x-service-key'];
+    const expectedKey = process.env.SERVICE_API_KEY;
+    
+    if (!expectedKey) {
+      console.error('❌ SERVICE_API_KEY not configured');
+      return res.status(500).json({
+        success: false,
+        error: 'Service not properly configured'
+      });
+    }
+    
+    if (!serviceKey) {
+      console.error('❌ Missing X-Service-Key header');
+      return res.status(403).json({
+        success: false,
+        error: 'Service authentication required'
+      });
+    }
+    
+    if (serviceKey !== expectedKey) {
+      console.error('❌ Invalid service key provided');
+      return res.status(403).json({
+        success: false,
+        error: 'Invalid service authentication'
+      });
+    }
+    
+    console.log('✅ Service authentication successful');
+    next();
+  } catch (error) {
+    console.error('❌ Error in service authentication:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Authentication error'
+    });
+  }
+};
+
+// Updated user info extraction middleware
 const extractUserInfo = (req, res, next) => {
   try {
-    // Extract user info from headers set by your main backend service
-    const userId = req.headers['x-user-id'];
-    const userEmail = req.headers['x-user-email'];
-    const authToken = req.headers['authorization'];
+    // First check for direct headers (from your main backend)
+    let userId = req.headers['x-user-id'];
+    let userEmail = req.headers['x-user-email'];
+    let userRole = req.headers['x-user-role'];
+    
+    // If not found, check for user context (JSON format)
+    if (!userId && req.headers['x-user-context']) {
+      try {
+        const userContext = JSON.parse(req.headers['x-user-context']);
+        userId = userContext.user_id;
+        userEmail = userContext.user_email;
+        userRole = userContext.user_role;
+      } catch (parseError) {
+        console.error('❌ Error parsing user context:', parseError);
+      }
+    }
+    
+    // Log what we received
+    console.log('🔍 Extracting user info:');
+    console.log('  - x-user-id:', userId);
+    console.log('  - x-user-email:', userEmail);
+    console.log('  - x-user-role:', userRole);
+    console.log('  - x-user-context:', req.headers['x-user-context']);
     
     if (!userId) {
+      console.error('❌ No user ID found in headers');
       return res.status(401).json({
         success: false,
-        error: 'User authentication required'
+        error: 'User authentication required - missing user ID'
       });
     }
     
     req.user = {
       id: userId,
-      email: userEmail,
-      token: authToken
+      email: userEmail || 'unknown@example.com',
+      role: userRole || 'student'
     };
     
+    console.log('✅ User info extracted successfully:', req.user);
     next();
   } catch (error) {
     console.error('❌ Error extracting user info:', error);
@@ -493,11 +558,15 @@ app.get('/metrics', (req, res) => {
   res.send(output);
 });
 
-// Get user projects
-app.get('/api/projects', extractUserInfo, async (req, res) => {
+// Replace the existing API routes in production_server.js with these:
+
+// Get user projects - ADD SERVICE AUTH
+app.get('/api/projects', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
     const offset = (page - 1) * limit;
+    
+    console.log(`📋 Getting projects for user: ${req.user.id}`);
     
     const projects = await DatabaseService.getUserProjects(
       req.user.id, 
@@ -521,10 +590,12 @@ app.get('/api/projects', extractUserInfo, async (req, res) => {
   }
 });
 
-// Get specific project
-app.get('/api/project/:projectId', extractUserInfo, async (req, res) => {
+// Get specific project - ADD SERVICE AUTH
+app.get('/api/project/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
+    
+    console.log(`📋 Getting project ${projectId} for user: ${req.user.id}`);
     
     const projectData = await DatabaseService.getProject(projectId, req.user.id);
     
@@ -548,8 +619,8 @@ app.get('/api/project/:projectId', extractUserInfo, async (req, res) => {
   }
 });
 
-// Create new project and generate script
-app.post('/api/generate-script', extractUserInfo, async (req, res) => {
+// Create new project and generate script - ADD SERVICE AUTH
+app.post('/api/generate-script', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { content, title } = req.body;
     
@@ -609,7 +680,7 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
     console.error('❌ Error generating script:', error);
     monitoring.error('Script generation failed', error, {
       userId: req.user.id,
-      contentLength: content?.length || 0
+      contentLength: req.body?.content?.length || 0
     });
     res.status(500).json({
       success: false,
@@ -618,8 +689,8 @@ app.post('/api/generate-script', extractUserInfo, async (req, res) => {
   }
 });
 
-// Generate video from project
-app.post('/api/generate-video', extractUserInfo, async (req, res) => {
+// Generate video from project - ADD SERVICE AUTH
+app.post('/api/generate-video', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.body;
     
@@ -630,7 +701,7 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
       });
     }
     
-    console.log(`⚡ Starting video generation for project: ${projectId}`);
+    console.log(`⚡ Starting video generation for project: ${projectId}, user: ${req.user.id}`);
     
     // Get project data from database
     const projectData = await DatabaseService.getProject(projectId, req.user.id);
@@ -702,7 +773,7 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
     console.error('❌ Error in video generation:', error);
     monitoring.error('Video generation failed', error, {
       userId: req.user.id,
-      projectId: projectId
+      projectId: req.body?.projectId
     });
     res.status(500).json({
       success: false,
@@ -711,8 +782,8 @@ app.post('/api/generate-video', extractUserInfo, async (req, res) => {
   }
 });
 
-// Serve video files
-app.get('/api/video/:projectId', extractUserInfo, async (req, res) => {
+// Serve video files - ADD SERVICE AUTH
+app.get('/api/video/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
     
@@ -785,10 +856,12 @@ app.get('/api/video/:projectId', extractUserInfo, async (req, res) => {
   }
 });
 
-// Download video
-app.get('/api/download/:projectId', extractUserInfo, async (req, res) => {
+// Download video - ADD SERVICE AUTH
+app.get('/api/download/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
+    
+    console.log(`📥 Download request for project: ${projectId} by user: ${req.user.id}`);
     
     const projectData = await DatabaseService.getProject(projectId, req.user.id);
     
@@ -822,10 +895,12 @@ app.get('/api/download/:projectId', extractUserInfo, async (req, res) => {
   }
 });
 
-// Delete project
-app.delete('/api/project/:projectId', extractUserInfo, async (req, res) => {
+// Delete project - ADD SERVICE AUTH
+app.delete('/api/project/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
+    
+    console.log(`🗑️ Delete request for project: ${projectId} by user: ${req.user.id}`);
     
     // Get project data to clean up files
     const projectData = await DatabaseService.getProject(projectId, req.user.id);
