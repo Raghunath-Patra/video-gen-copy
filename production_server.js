@@ -570,7 +570,7 @@ async function createTempScriptFile(projectData) {
 const LESSON_CONTENT = ${JSON.stringify(scriptContent.LESSON_CONTENT, null, 2)};
 
 ${Object.entries(scriptContent.visualFunctions).map(([name, func]) => 
-  `function ${name}${func.toString().substring(8)}`
+  `const ${name} = ${func.toString()};`
 ).join('\n\n')}
 
 module.exports = {
@@ -820,12 +820,23 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
       
     } finally {
       // Clean up temporary files
+      // Clean up ALL temporary files and directories
       try {
-        if (tempScriptPath && existsSync(tempScriptPath)) {
-          await fs.unlink(tempScriptPath);
-        }
-        if (tempVideoPath && existsSync(tempVideoPath)) {
-          await fs.unlink(tempVideoPath);
+        const cleanupPaths = [
+          tempScriptPath,
+          tempVideoPath,
+          videoOutputDir  // This will recursively delete the entire output structure
+        ];
+        
+        for (const cleanupPath of cleanupPaths) {
+          if (cleanupPath && existsSync(cleanupPath)) {
+            const stats = await fs.stat(cleanupPath);
+            if (stats.isDirectory()) {
+              await fs.rm(cleanupPath, { recursive: true, force: true });
+            } else {
+              await fs.unlink(cleanupPath);
+            }
+          }
         }
       } catch (cleanupError) {
         console.warn('Warning: Could not delete temp files:', cleanupError.message);
