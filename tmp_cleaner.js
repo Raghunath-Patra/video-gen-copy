@@ -9,7 +9,7 @@ class TmpCleaner {
       '/tmp/uploads',
       '/tmp/temp', 
       '/tmp/output',
-      '/tmp/temp_script_*.js' // Pattern for temp script files
+      '/tmp/*.js' // All JS files in /tmp
     ];
     
     this.stats = {
@@ -30,28 +30,41 @@ class TmpCleaner {
       totalSize: 0
     };
 
-    // Clear specific directories
-    for (const tmpPath of ['/tmp/uploads', '/tmp/temp', '/tmp/output']) {
-      try {
-        if (existsSync(tmpPath)) {
-          const dirResults = await this.clearDirectory(tmpPath);
-          results.deleted.push(...dirResults.deleted);
-          results.errors.push(...dirResults.errors);
-          results.totalSize += dirResults.totalSize;
-        }
-      } catch (error) {
-        results.errors.push({ path: tmpPath, error: error.message });
-      }
-    }
-
-    // Clear temp script files (pattern: /tmp/*.js)
     try {
-      const tempScriptResults = await this.clearTempScriptFiles();
-      results.deleted.push(...tempScriptResults.deleted);
-      results.errors.push(...tempScriptResults.errors);
-      results.totalSize += tempScriptResults.totalSize;
+      // Just clear everything in /tmp directory
+      const tmpDir = '/tmp';
+      
+      if (!existsSync(tmpDir)) {
+        console.log('⚠️ /tmp directory not found');
+        return results;
+      }
+
+      const entries = await fs.readdir(tmpDir, { withFileTypes: true });
+      
+      for (const entry of entries) {
+        const fullPath = path.join(tmpDir, entry.name);
+        
+        try {
+          const stats = await fs.stat(fullPath);
+          const size = stats.size || 0;
+          
+          if (entry.isDirectory()) {
+            await fs.rm(fullPath, { recursive: true, force: true });
+            results.deleted.push({ path: fullPath, type: 'directory', size });
+          } else {
+            await fs.unlink(fullPath);
+            results.deleted.push({ path: fullPath, type: 'file', size });
+          }
+          
+          results.totalSize += size;
+          
+        } catch (error) {
+          results.errors.push({ path: fullPath, error: error.message });
+        }
+      }
+      
     } catch (error) {
-      results.errors.push({ path: '/tmp/*.js', error: error.message });
+      results.errors.push({ path: '/tmp', error: error.message });
     }
 
     // Update stats
@@ -109,7 +122,7 @@ class TmpCleaner {
     return results;
   }
 
-  // Clear temp script files matching pattern
+  // Clear all JS files in /tmp
   async clearTempScriptFiles() {
     const results = { deleted: [], errors: [], totalSize: 0 };
 
@@ -122,8 +135,8 @@ class TmpCleaner {
       const entries = await fs.readdir(tmpDir);
       
       for (const entry of entries) {
-        // Match temp_script_*.js pattern
-        if (entry.startsWith('temp_script_') && entry.endsWith('.js')) {
+        // Match all *.js files
+        if (entry.endsWith('.js')) {
           const fullPath = path.join(tmpDir, entry);
           
           try {
@@ -170,18 +183,18 @@ class TmpCleaner {
       }
     }
 
-    // Count temp script files
+    // Count all JS files
     try {
-      const tempScriptFiles = await this.countTempScriptFiles();
-      usage.temp_scripts = tempScriptFiles;
+      const jsFiles = await this.countTempScriptFiles();
+      usage.js_files = jsFiles;
     } catch (error) {
-      usage.temp_scripts = { error: error.message };
+      usage.js_files = { error: error.message };
     }
 
     return usage;
   }
 
-  // Count temp script files
+  // Count all JS files in /tmp
   async countTempScriptFiles() {
     let count = 0;
     let totalSize = 0;
@@ -192,7 +205,8 @@ class TmpCleaner {
         const entries = await fs.readdir(tmpDir);
         
         for (const entry of entries) {
-          if (entry.startsWith('temp_script_') && entry.endsWith('.js')) {
+          // Count all *.js files
+          if (entry.endsWith('.js')) {
             const fullPath = path.join(tmpDir, entry);
             try {
               const stats = await fs.stat(fullPath);
