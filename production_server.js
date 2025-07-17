@@ -93,12 +93,9 @@ app.use(express.static('public'));
 const upload = multer({
   dest: '/tmp/uploads/', // Use /tmp for Railway
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB limit
+    fileSize: 100 * 1024 * 1024 // 100MB limit for video files
   }
 });
-
-// Middleware to extract user info from forwarded request
-// Replace the existing extractUserInfo middleware in production_server.js
 
 // Service authentication middleware
 const authenticateService = (req, res, next) => {
@@ -136,10 +133,416 @@ const authenticateService = (req, res, next) => {
     console.error('❌ Error in service authentication:', error);
     res.status(500).json({
       success: false,
-      error: 'Authentication error'
+      error: error.message || 'Video generation failed'
     });
   }
 };
+
+// Serve video files from Supabase Storage
+app.get('/api/video/:projectId', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    console.log(`🎬 Video request for project: ${projectId} by user: ${req.user.id}`);
+    
+    // Get project and verify ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    
+    if (!projectData || !projectData.videos || projectData.videos.length === 0) {
+      return res.status(404).json({
+        error: 'Video not found',
+        projectId: projectId
+      });
+    }
+    
+    const video = projectData.videos[0]; // Get the first video
+    const storagePath = video.storage_path;
+    
+    if (!storagePath) {
+      console.log(`❌ No storage path found for video: ${projectId}`);
+      return res.status(404).json({
+        error: 'Video file not found',
+        projectId: projectId
+      });
+    }
+    
+    console.log(`✅ Video found in storage: ${storagePath}`);
+    
+    // Handle range requests for video seeking/streaming
+    const range = req.headers.range;
+    
+    try {
+      // Get signed URL for direct access
+      const signedUrl = await StorageService.getSignedUrl(
+        video.bucket_name,
+        storagePath,
+        3600 // 1 hour expiry
+      );
+      
+      // For range requests, we need to proxy the request
+      if (range) {
+        const fetch = require('node-fetch');
+        const response = await fetch(signedUrl, {
+          headers: { range }
+        });
+        
+        // Copy headers from storage response
+        res.status(response.status);
+        response.headers.forEach((value, name) => {
+          res.setHeader(name, value);
+        });
+        
+        // Stream the response
+        response.body.pipe(res);
+      } else {
+        // For non-range requests, redirect to signed URL
+        res.redirect(signedUrl);
+      }
+      
+    } catch (storageError) {
+      console.error('❌ Error accessing video from storage:', storageError);
+      res.status(500).json({
+        error: 'Video access error',
+        details: storageError.message
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in video endpoint:', error);
+    res.status(500).json({
+      error: 'Video serving error',
+      details: error.message
+    });
+  }
+});
+
+// Download video from Supabase Storage
+app.get('/api/download/:projectId', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    console.log(`📥 Download request for project: ${projectId} by user: ${req.user.id}`);
+    
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    
+    if (!projectData || !projectData.videos || projectData.videos.length === 0) {
+      return res.status(404).send('Video not found');
+    }
+    
+    const video = projectData.videos[0];
+    const storagePath = video.storage_path;
+    
+    if (!storagePath) {
+      return res.status(404).send('Video file not found');
+    }
+    
+    try {
+      // Download file from storage
+      const fileBlob = await StorageService.downloadFile(video.bucket_name, storagePath);
+      
+      // Set download headers
+      const downloadFilename = `${projectData.project.title.replace(/[^a-zA-Z0-9]/g, '_')}_video.mp4`;
+      res.setHeader('Content-Disposition', `attachment; filename="${downloadFilename}"`);
+      res.setHeader('Content-Type', 'video/mp4');
+      
+      // Convert blob to buffer and send
+      const buffer = await fileBlob.arrayBuffer();
+      res.send(Buffer.from(buffer));
+      
+    } catch (storageError) {
+      console.error('❌ Error downloading from storage:', storageError);
+      res.status(500).send('Error downloading video');
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in download endpoint:', error);
+    res.status(500).send('Error downloading video');
+  }
+});
+
+// Get video stream URL (for direct access)
+app.get('/api/stream/:projectId', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { expires = 3600 } = req.query; // Default 1 hour
+    
+    console.log(`🎥 Stream URL request for project: ${projectId} by user: ${req.user.id}`);
+    
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    
+    if (!projectData || !projectData.videos || projectData.videos.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: 'Video not found'
+      });
+    }
+    
+    const video = projectData.videos[0];
+    const storagePath = video.storage_path;
+    
+    if (!storagePath) {
+      return res.status(404).json({
+        success: false,
+        error: 'Video file not found'
+      });
+    }
+    
+    try {
+      // Get signed URL for streaming
+      const signedUrl = await StorageService.getSignedUrl(
+        video.bucket_name,
+        storagePath,
+        parseInt(expires)
+      );
+      
+      res.json({
+        success: true,
+        streamUrl: signedUrl,
+        expiresIn: parseInt(expires),
+        projectId: projectId,
+        duration: video.duration
+      });
+      
+    } catch (storageError) {
+      console.error('❌ Error getting stream URL:', storageError);
+      res.status(500).json({
+        success: false,
+        error: 'Error generating stream URL'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ Error in stream endpoint:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Stream URL generation failed'
+    });
+  }
+});
+
+// Delete project
+app.delete('/api/project/:projectId', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    console.log(`🗑️ Delete request for project: ${projectId} by user: ${req.user.id}`);
+    
+    // Delete from database (will also clean up storage files)
+    await DatabaseService.deleteProject(projectId, req.user.id);
+    
+    res.json({
+      success: true,
+      message: 'Project deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error deleting project:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete project'
+    });
+  }
+});
+
+// Upload audio file (for custom audio uploads)
+app.post('/api/upload-audio/:projectId', authenticateService, extractUserInfo, upload.single('audio'), async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { lessonStepId } = req.body;
+    
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        error: 'No audio file provided'
+      });
+    }
+    
+    console.log(`🎵 Audio upload for project: ${projectId}, step: ${lessonStepId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Upload to Supabase Storage
+    const audioFileName = `${projectId}_step_${lessonStepId}_${Date.now()}.mp3`;
+    const storagePath = await StorageService.uploadFile(
+      'audio-files',
+      audioFileName,
+      req.file.path,
+      req.user.id
+    );
+    
+    // Save audio file record
+    const audioRecord = await DatabaseService.saveAudioFile(
+      lessonStepId,
+      storagePath,
+      'audio-files',
+      0 // Duration - you might want to calculate this
+    );
+    
+    // Clean up temporary file
+    await fs.unlink(req.file.path);
+    
+    res.json({
+      success: true,
+      message: 'Audio uploaded successfully',
+      audioFile: audioRecord
+    });
+    
+  } catch (error) {
+    console.error('❌ Error uploading audio:', error);
+    
+    // Clean up temporary file on error
+    if (req.file?.path) {
+      try {
+        await fs.unlink(req.file.path);
+      } catch (cleanupError) {
+        console.warn('Warning: Could not delete temp file:', cleanupError.message);
+      }
+    }
+    
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Audio upload failed'
+    });
+  }
+});
+
+// Get audio file
+app.get('/api/audio/:audioId', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { audioId } = req.params;
+    
+    console.log(`🎵 Audio request for ID: ${audioId} by user: ${req.user.id}`);
+    
+    // Get audio file record
+    const { data: audioFile, error } = await supabase
+      .from('audio_files')
+      .select(`
+        *,
+        lesson_steps!inner(
+          project_id,
+          projects!inner(user_id)
+        )
+      `)
+      .eq('id', audioId)
+      .eq('lesson_steps.projects.user_id', req.user.id)
+      .single();
+    
+    if (error || !audioFile) {
+      return res.status(404).json({
+        success: false,
+        error: 'Audio file not found'
+      });
+    }
+    
+    // Get signed URL for audio access
+    const signedUrl = await StorageService.getSignedUrl(
+      audioFile.bucket_name,
+      audioFile.storage_path,
+      3600 // 1 hour expiry
+    );
+    
+    res.redirect(signedUrl);
+    
+  } catch (error) {
+    console.error('❌ Error serving audio:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Audio serving error'
+    });
+  }
+});
+
+// Error handling middleware
+app.use(monitoring.errorMiddleware());
+
+app.use((error, req, res, next) => {
+  monitoring.error('Unhandled application error', error, {
+    method: req.method,
+    url: req.url,
+    userId: req.user?.id
+  });
+  
+  res.status(500).json({
+    success: false,
+    error: process.env.NODE_ENV === 'production' ? 'Internal server error' : error.message
+  });
+});
+
+// 404 handler
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    error: 'Endpoint not found'
+  });
+});
+
+// Start server
+async function startServer() {
+  try {
+    await initializeDirectories();
+    
+    // Test Supabase connection
+    try {
+      const { data, error } = await supabase.from('projects').select('count').limit(1);
+      if (error) throw error;
+      console.log('✅ Supabase database connection successful');
+    } catch (dbError) {
+      console.error('❌ Supabase database connection failed:', dbError);
+    }
+    
+    // Test Supabase Storage connection
+    try {
+      const { data: buckets, error: storageError } = await supabase.storage.listBuckets();
+      if (storageError) throw storageError;
+      console.log('✅ Supabase storage connection successful');
+      console.log('📦 Available buckets:', buckets.map(b => b.name).join(', '));
+    } catch (storageError) {
+      console.error('❌ Supabase storage connection failed:', storageError);
+    }
+    
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log('🚀 Production Video Generator Service Started!');
+      console.log(`📡 Server running on: http://0.0.0.0:${PORT}`);
+      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🗄️ Database: ${process.env.SUPABASE_URL ? 'Connected' : 'Not configured'}`);
+      console.log(`🔑 Auth: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Configured' : 'Missing'}`);
+      console.log(`📦 Storage: Supabase Storage with buckets: audio-files, video-files`);
+      console.log(`🎬 Video generation service ready for production!`);
+      
+      // Log environment variables status
+      console.log('\n📋 Environment Check:');
+      console.log(`   SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
+      console.log(`   SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing'}`);
+      console.log(`   SERVICE_API_KEY: ${process.env.SERVICE_API_KEY ? '✅ Set' : '❌ Missing'}`);
+      console.log(`   ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? '✅ Set' : '❌ Missing'}`);
+      console.log(`   SMALLEST_API_KEY: ${process.env.SMALLEST_API_KEY ? '✅ Set' : '❌ Missing'}`);
+      console.log(`   ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'Using defaults'}`);
+    });
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
+    process.exit(1);
+  }
+}
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down server gracefully...');
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  console.log('\n🛑 Shutting down server gracefully...');
+  process.exit(0);
+});
+
+startServer();
 
 // Updated user info extraction middleware
 const extractUserInfo = (req, res, next) => {
@@ -193,7 +596,99 @@ const extractUserInfo = (req, res, next) => {
   }
 };
 
-// Database helper functions
+// Storage helper functions for Supabase
+class StorageService {
+  // Upload file to Supabase Storage
+  static async uploadFile(bucketName, filePath, localPath, userId) {
+    try {
+      const fileBuffer = await fs.readFile(localPath);
+      const fullPath = `${userId}/${filePath}`;
+      
+      console.log(`📤 Uploading ${localPath} to ${bucketName}/${fullPath}`);
+      
+      const { data, error } = await supabase.storage
+        .from(bucketName)
+        .upload(fullPath, fileBuffer, {
+          upsert: true,
+          contentType: bucketName === 'video-files' ? 'video/mp4' : 'audio/mpeg'
+        });
+      
+      if (error) {
+        console.error('❌ Upload error:', error);
+        throw error;
+      }
+      
+      console.log('✅ Upload successful:', data.path);
+      return data.path;
+    } catch (error) {
+      console.error('❌ Error uploading file:', error);
+      throw error;
+    }
+  }
+  
+  // Download file from Supabase Storage
+  static async downloadFile(bucketName, filePath) {
+    try {
+      console.log(`📥 Downloading ${bucketName}/${filePath}`);
+      
+      const { data, error } = await supabase.storage
+        .from(bucketName)
+        .download(filePath);
+      
+      if (error) {
+        console.error('❌ Download error:', error);
+        throw error;
+      }
+      
+      return data;
+    } catch (error) {
+      console.error('❌ Error downloading file:', error);
+      throw error;
+    }
+  }
+  
+  // Get signed URL for file access
+  static async getSignedUrl(bucketName, filePath, expiresIn = 3600) {
+    try {
+      const { data, error } = await supabase.storage
+        .from(bucketName)
+        .createSignedUrl(filePath, expiresIn);
+      
+      if (error) {
+        console.error('❌ Signed URL error:', error);
+        throw error;
+      }
+      
+      return data.signedUrl;
+    } catch (error) {
+      console.error('❌ Error getting signed URL:', error);
+      throw error;
+    }
+  }
+  
+  // Delete file from Supabase Storage
+  static async deleteFile(bucketName, filePath) {
+    try {
+      console.log(`🗑️ Deleting ${bucketName}/${filePath}`);
+      
+      const { error } = await supabase.storage
+        .from(bucketName)
+        .remove([filePath]);
+      
+      if (error) {
+        console.error('❌ Delete error:', error);
+        throw error;
+      }
+      
+      console.log('✅ File deleted successfully');
+    } catch (error) {
+      console.error('❌ Error deleting file:', error);
+      throw error;
+    }
+  }
+}
+
+// Updated Database helper functions
 class DatabaseService {
   static async createProject(userId, title, inputContent) {
     try {
@@ -347,6 +842,17 @@ class DatabaseService {
       
       if (stepsError) throw stepsError;
       
+      // Get audio files
+      const { data: audioFiles, error: audioError } = await supabase
+        .from('audio_files')
+        .select(`
+          *,
+          lesson_steps!inner(project_id)
+        `)
+        .eq('lesson_steps.project_id', projectId);
+      
+      if (audioError) throw audioError;
+      
       // Get videos
       const { data: videos, error: videosError } = await supabase
         .from('videos')
@@ -360,6 +866,7 @@ class DatabaseService {
         speakers: speakers || [],
         visualFunctions: visualFunctions || [],
         lessonSteps: lessonSteps || [],
+        audioFiles: audioFiles || [],
         videos: videos || []
       };
     } catch (error) {
@@ -374,7 +881,7 @@ class DatabaseService {
         .from('projects')
         .select(`
           *,
-          videos (id, file_path, duration),
+          videos (id, storage_path, duration),
           lesson_steps (id)
         `)
         .eq('user_id', userId)
@@ -395,13 +902,35 @@ class DatabaseService {
     }
   }
   
-  static async saveVideo(projectId, userId, filePath, duration) {
+  static async saveAudioFile(lessonStepId, storagePath, bucketName, duration) {
+    try {
+      const { data, error } = await supabase
+        .from('audio_files')
+        .insert([{
+          lesson_step_id: lessonStepId,
+          storage_path: storagePath,
+          bucket_name: bucketName,
+          duration
+        }])
+        .select()
+        .single();
+      
+      if (error) throw error;
+      return data;
+    } catch (error) {
+      console.error('❌ Database error saving audio file:', error);
+      throw error;
+    }
+  }
+  
+  static async saveVideo(projectId, userId, storagePath, bucketName, duration) {
     try {
       const { data, error } = await supabase
         .from('videos')
         .insert([{
           project_id: projectId,
-          file_path: filePath,
+          storage_path: storagePath,
+          bucket_name: bucketName,
           duration
         }])
         .select()
@@ -421,6 +950,25 @@ class DatabaseService {
   
   static async deleteProject(projectId, userId) {
     try {
+      // Get project data first to clean up storage
+      const projectData = await this.getProject(projectId, userId);
+      
+      if (projectData) {
+        // Delete video files from storage
+        for (const video of projectData.videos) {
+          if (video.storage_path) {
+            await StorageService.deleteFile(video.bucket_name, video.storage_path);
+          }
+        }
+        
+        // Delete audio files from storage
+        for (const audio of projectData.audioFiles) {
+          if (audio.storage_path) {
+            await StorageService.deleteFile(audio.bucket_name, audio.storage_path);
+          }
+        }
+      }
+      
       // Delete project (cascade will handle related records)
       const { error } = await supabase
         .from('projects')
@@ -537,7 +1085,8 @@ app.get('/health', (req, res) => {
     environment: process.env.NODE_ENV || 'development',
     timestamp: new Date().toISOString(),
     uptime: healthStatus.metrics.uptime,
-    database: 'connected', // Will be updated by database check
+    database: 'connected',
+    storage: 'connected',
     issues: healthStatus.issues,
     metrics: healthStatus.metrics
   });
@@ -558,9 +1107,7 @@ app.get('/metrics', (req, res) => {
   res.send(output);
 });
 
-// Replace the existing API routes in production_server.js with these:
-
-// Get user projects - ADD SERVICE AUTH
+// Get user projects
 app.get('/api/projects', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { page = 1, limit = 20 } = req.query;
@@ -590,7 +1137,7 @@ app.get('/api/projects', authenticateService, extractUserInfo, async (req, res) 
   }
 });
 
-// Get specific project - ADD SERVICE AUTH
+// Get specific project
 app.get('/api/project/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -619,7 +1166,7 @@ app.get('/api/project/:projectId', authenticateService, extractUserInfo, async (
   }
 });
 
-// Create new project and generate script - ADD SERVICE AUTH
+// Create new project and generate script
 app.post('/api/generate-script', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { content, title } = req.body;
@@ -689,7 +1236,7 @@ app.post('/api/generate-script', authenticateService, extractUserInfo, async (re
   }
 });
 
-// Generate video from project - ADD SERVICE AUTH
+// Generate video from project
 app.post('/api/generate-video', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.body;
@@ -723,6 +1270,8 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
     // Create temporary script file
     const tempScriptPath = await createTempScriptFile(projectData);
     
+    let tempVideoPath = null;
+    
     try {
       // Generate video with optimized generator
       const videoOutputDir = `/tmp/output/${projectId}`;
@@ -734,13 +1283,23 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
       };
       
       const generator = new FixedOptimizedVideoGenerator(tempScriptPath, generatorOptions);
-      const videoPath = await generator.generate();
+      tempVideoPath = await generator.generate();
       
-      console.log(`✅ Video generation complete: ${videoPath}`);
+      console.log(`✅ Video generation complete: ${tempVideoPath}`);
       
-      // Get video duration
-      const videoStats = await fs.stat(videoPath);
-      const videoDuration = 30; // You might want to get actual duration using ffprobe
+      // Upload video to Supabase Storage
+      const videoFileName = `${projectId}_${Date.now()}.mp4`;
+      const storagePath = await StorageService.uploadFile(
+        'video-files',
+        videoFileName,
+        tempVideoPath,
+        req.user.id
+      );
+      
+      console.log(`✅ Video uploaded to storage: ${storagePath}`);
+      
+      // Get video duration (you might want to implement this properly)
+      const videoDuration = 30; // Placeholder - implement actual duration calculation
       
       monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
       
@@ -748,7 +1307,8 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
       await DatabaseService.saveVideo(
         projectId,
         req.user.id,
-        videoPath,
+        storagePath,
+        'video-files',
         videoDuration
       );
       
@@ -756,16 +1316,17 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
         success: true,
         message: 'Video generated successfully!',
         projectId: projectId,
-        videoPath: videoPath,
+        storagePath: storagePath,
         duration: videoDuration
       });
       
     } finally {
-      // Clean up temporary script file
+      // Clean up temporary files
       try {
-        await fs.unlink(tempScriptPath);
+        if (tempScriptPath) await fs.unlink(tempScriptPath);
+        if (tempVideoPath && existsSync(tempVideoPath)) await fs.unlink(tempVideoPath);
       } catch (error) {
-        console.warn('Warning: Could not delete temp script file:', error.message);
+        console.warn('Warning: Could not delete temp files:', error.message);
       }
     }
     
@@ -959,42 +1520,42 @@ app.use((req, res) => {
   });
 });
 
-// Start server
-async function startServer() {
-  try {
-    await initializeDirectories();
+// // Start server
+// async function startServer() {
+//   try {
+//     await initializeDirectories();
     
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log('🚀 Production Video Generator Service Started!');
-      console.log(`📡 Server running on: http://0.0.0.0:${PORT}`);
-      console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🗄️ Database: ${process.env.SUPABASE_URL ? 'Connected' : 'Not configured'}`);
-      console.log(`🔑 Auth: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Configured' : 'Missing'}`);
-      console.log(`🎬 Video generation service ready for production!`);
+//     app.listen(PORT, '0.0.0.0', () => {
+//       console.log('🚀 Production Video Generator Service Started!');
+//       console.log(`📡 Server running on: http://0.0.0.0:${PORT}`);
+//       console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
+//       console.log(`🗄️ Database: ${process.env.SUPABASE_URL ? 'Connected' : 'Not configured'}`);
+//       console.log(`🔑 Auth: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? 'Configured' : 'Missing'}`);
+//       console.log(`🎬 Video generation service ready for production!`);
       
-      // Log environment variables status
-      console.log('\n📋 Environment Check:');
-      console.log(`   SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
-      console.log(`   SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing'}`);
-      console.log(`   ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? '✅ Set' : '❌ Missing'}`);
-      console.log(`   SMALLEST_API_KEY: ${process.env.SMALLEST_API_KEY ? '✅ Set' : '❌ Missing'}`);
-      console.log(`   ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'Using defaults'}`);
-    });
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-}
+//       // Log environment variables status
+//       console.log('\n📋 Environment Check:');
+//       console.log(`   SUPABASE_URL: ${process.env.SUPABASE_URL ? '✅ Set' : '❌ Missing'}`);
+//       console.log(`   SUPABASE_SERVICE_ROLE_KEY: ${process.env.SUPABASE_SERVICE_ROLE_KEY ? '✅ Set' : '❌ Missing'}`);
+//       console.log(`   ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? '✅ Set' : '❌ Missing'}`);
+//       console.log(`   SMALLEST_API_KEY: ${process.env.SMALLEST_API_KEY ? '✅ Set' : '❌ Missing'}`);
+//       console.log(`   ALLOWED_ORIGINS: ${process.env.ALLOWED_ORIGINS || 'Using defaults'}`);
+//     });
+//   } catch (error) {
+//     console.error('❌ Failed to start server:', error);
+//     process.exit(1);
+//   }
+// }
 
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down server gracefully...');
-  process.exit(0);
-});
+// // Graceful shutdown
+// process.on('SIGINT', () => {
+//   console.log('\n🛑 Shutting down server gracefully...');
+//   process.exit(0);
+// });
 
-process.on('SIGTERM', () => {
-  console.log('\n🛑 Shutting down server gracefully...');
-  process.exit(0);
-});
+// process.on('SIGTERM', () => {
+//   console.log('\n🛑 Shutting down server gracefully...');
+//   process.exit(0);
+// });
 
-startServer();
+// startServer();
