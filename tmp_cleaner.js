@@ -44,14 +44,14 @@ class TmpCleaner {
       }
     }
 
-    // Clear temp script files (pattern: /tmp/temp_script_*.js)
+    // Clear temp script files (pattern: /tmp/*.js)
     try {
       const tempScriptResults = await this.clearTempScriptFiles();
       results.deleted.push(...tempScriptResults.deleted);
       results.errors.push(...tempScriptResults.errors);
       results.totalSize += tempScriptResults.totalSize;
     } catch (error) {
-      results.errors.push({ path: '/tmp/temp_script_*.js', error: error.message });
+      results.errors.push({ path: '/tmp/*.js', error: error.message });
     }
 
     // Update stats
