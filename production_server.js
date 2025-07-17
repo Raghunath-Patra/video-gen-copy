@@ -792,7 +792,12 @@ app.post('/api/generate-video', authenticateService, extractUserInfo, async (req
         videoName: videoName
       };
       
-      const generator = new FixedOptimizedVideoGenerator(tempScriptPath, generatorOptions);
+      const generator = new FixedOptimizedVideoGenerator(tempScriptPath, {
+        ...generatorOptions,
+        supabase: supabase,
+        userId: req.user.id,
+        projectId: projectId
+      });
       tempVideoPath = await generator.generate();
       
       console.log(`✅ Video generation complete: ${tempVideoPath}`);

@@ -8,6 +8,8 @@ const ffmpegPath = require('ffmpeg-static');
 const ffprobePath = require('ffprobe-static').path;
 const crypto = require('crypto');
 const os = require('os');
+// Add after other requires
+const { createClient } = require('@supabase/supabase-js');
 
 let createCanvas;
 try {
@@ -66,6 +68,9 @@ class FixedOptimizedVideoGenerator {
     this.options = { ...options };
     this.config = { ...STATIC_CONFIG, ...options };
     
+    this.supabase = options.supabase || null;
+    this.userId = options.userId || null;
+    this.projectId = options.projectId || null;
     // Frame optimization
     this.frameCache = new Map(); // Hash -> frame file path
     this.uniqueFrames = new Map(); // Step -> unique frame info
@@ -721,6 +726,50 @@ class FixedOptimizedVideoGenerator {
       const duration = await this.getAudioDuration(finalAudioPath);
       step.actualAudioDuration = duration;
       step.audioPath = finalAudioPath;
+      // Add this block after step.audioPath = finalAudioPath; (around line 445)
+      if (this.supabase && this.userId && this.projectId) {
+        try {
+          // Upload to Supabase storage
+          const audioFileName = `${this.projectId}_step_${stepIndex + 1}_${Date.now()}.wav`;
+          const fileBuffer = await fs.readFile(finalAudioPath);
+          const storagePath = `${this.userId}/${audioFileName}`;
+          
+          const { data: uploadData, error: uploadError } = await this.supabase.storage
+            .from('audio-files')
+            .upload(storagePath, fileBuffer, {
+              upsert: true,
+              contentType: 'audio/wav'
+            });
+          
+          if (uploadError) throw uploadError;
+          
+          // Find the lesson step ID from database
+          const { data: lessonStep, error: stepError } = await this.supabase
+            .from('lesson_steps')
+            .select('id')
+            .eq('project_id', this.projectId)
+            .eq('step_order', stepIndex + 1)
+            .single();
+          
+          if (!stepError && lessonStep) {
+            // Save audio file record to database
+            const { error: dbError } = await this.supabase
+              .from('audio_files')
+              .insert([{
+                lesson_step_id: lessonStep.id,
+                storage_path: uploadData.path,
+                bucket_name: 'audio-files',
+                duration: duration
+              }]);
+            
+            if (dbError) throw dbError;
+            console.log(`   📤 Audio uploaded to storage: ${uploadData.path}`);
+          }
+        } catch (storageError) {
+          console.error(`   ⚠️ Failed to upload audio to storage:`, storageError.message);
+          // Don't fail the entire process, just continue without storage
+        }
+      }
       
     } catch (error) {
       console.error(`   ❌ ${stepLabel}: Audio generation failed:`, error.message);
