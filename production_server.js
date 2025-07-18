@@ -596,6 +596,81 @@ function calculateVideoDuration(videoPath) {
   return 30; // Default 30 seconds
 }
 
+// Helper function for audio generation (add near other helper functions)
+async function generateAudioWithSmallestAi(text, voiceConfig) {
+  if (!process.env.SMALLEST_API_KEY) {
+    throw new Error('Smallest.ai token not available');
+  }
+
+  const { voice, model } = voiceConfig;
+  const apiUrl = `https://waves-api.smallest.ai/api/v1/${model}/get_speech`;
+
+  const payload = {
+    text: text.trim(),
+    voice_id: voice,
+    sample_rate: 24000,
+    speed: 1.0,
+    add_wav_header: true
+  };
+
+  const options = {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.SMALLEST_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  };
+
+  try {
+    const response = await fetch(apiUrl, options);
+    
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Smallest.ai API error: ${response.status} ${response.statusText} - ${errorText}`);
+    }
+
+    const audioBuffer = await response.arrayBuffer();
+    
+    if (audioBuffer.byteLength === 0) {
+      throw new Error('Received empty audio buffer from API');
+    }
+
+    return Buffer.from(audioBuffer);
+  } catch (error) {
+    console.error('❌ Smallest.ai API call failed:', error.message);
+    throw error;
+  }
+}
+
+// Helper function for audio duration (add near other helper functions)
+async function getAudioDuration(audioFilePath) {
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn(require('ffprobe-static').path, [
+      '-v', 'error',
+      '-show_entries', 'format=duration',
+      '-of', 'default=noprint_wrappers=1:nokey=1',
+      audioFilePath
+    ]);
+    let duration = '';
+    let errorOutput = '';
+    ffprobe.stdout.on('data', (data) => { duration += data.toString().trim(); });
+    ffprobe.stderr.on('data', (data) => { errorOutput += data.toString(); });
+    ffprobe.on('close', (code) => {
+      if (code === 0 && duration && !isNaN(parseFloat(duration))) {
+        resolve(parseFloat(duration));
+      } else {
+        console.error(`ffprobe error for ${audioFilePath} (code ${code}): ${errorOutput}`);
+        resolve(0);
+      }
+    });
+    ffprobe.on('error', (err) => {
+      console.error(`Failed to start ffprobe for ${audioFilePath}:`, err);
+      resolve(0);
+    });
+  });
+}
+
 // API Routes
 
 // Health check
@@ -746,7 +821,7 @@ app.post('/api/generate-script', authenticateService, extractUserInfo, async (re
 });
 
 // Generate video
-app.post('/api/generate-video', authenticateService, extractUserInfo, async (req, res) => {
+app.post('/api/generate-video/old', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.body;
     
@@ -1142,6 +1217,962 @@ app.get('/api/audio/:audioId', authenticateService, extractUserInfo, async (req,
     });
   }
 });
+
+// Update a specific lesson step (add after existing project routes)
+app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, stepOrder } = req.params;
+    const { stepData, regenerateAudio } = req.body;
+    
+    console.log(`📝 Updating step ${stepOrder} for project: ${projectId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Update lesson step in database
+    const { data: lessonStep, error: stepError } = await supabase
+      .from('lesson_steps')
+      .update({
+        speaker: stepData.speaker,
+        title: stepData.title,
+        content: stepData.content,
+        content2: stepData.content2,
+        narration: stepData.narration,
+        visual_duration: stepData.visualDuration || 4.0,
+        is_complex: stepData.isComplex || false,
+        visual_type: stepData.visual?.type,
+        visual_params: stepData.visual?.params || null,
+        updated_at: new Date()
+      })
+      .eq('project_id', projectId)
+      .eq('step_order', parseInt(stepOrder))
+      .select()
+      .single();
+    
+    if (stepError) throw stepError;
+    
+    let audioGenerated = false;
+    
+    // Regenerate audio if narration or speaker changed
+    if (regenerateAudio && lessonStep) {
+      try {
+        // Get speaker configuration
+        const { data: speakers } = await supabase
+          .from('speakers')
+          .select('*')
+          .eq('project_id', projectId);
+        
+        const speakerConfig = speakers?.find(s => s.speaker_key === stepData.speaker);
+        
+        if (speakerConfig && process.env.SMALLEST_API_KEY) {
+          // Generate new audio
+          const audioBuffer = await generateAudioWithSmallestAi(
+            stepData.narration, 
+            {
+              voice: speakerConfig.voice,
+              model: speakerConfig.model
+            }
+          );
+          
+          // Save temporary audio file
+          const tempAudioPath = `/tmp/temp_audio_${Date.now()}.wav`;
+          await fs.writeFile(tempAudioPath, audioBuffer);
+          
+          // Upload to storage
+          const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
+          const storagePath = await StorageService.uploadFile(
+            'audio-files',
+            audioFileName,
+            tempAudioPath,
+            req.user.id
+          );
+          
+          // Get audio duration
+          const duration = await getAudioDuration(tempAudioPath);
+          
+          // Delete old audio file from storage and database
+          const { data: oldAudio } = await supabase
+            .from('audio_files')
+            .select('storage_path, bucket_name')
+            .eq('lesson_step_id', lessonStep.id)
+            .single();
+          
+          if (oldAudio?.storage_path) {
+            await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+          }
+          
+          // Update audio file record
+          await supabase
+            .from('audio_files')
+            .upsert([{
+              lesson_step_id: lessonStep.id,
+              storage_path: storagePath,
+              bucket_name: 'audio-files',
+              duration: duration
+            }]);
+          
+          // Clean up temp file
+          await fs.unlink(tempAudioPath);
+          audioGenerated = true;
+        }
+      } catch (audioError) {
+        console.error('❌ Audio regeneration failed:', audioError);
+        // Don't fail the entire request, just log the error
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Lesson step updated successfully',
+      audioRegenerated: audioGenerated,
+      updatedStep: lessonStep
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating lesson step:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update lesson step'
+    });
+  }
+});
+
+// Enhanced AI modification endpoint (replace the previous one)
+app.post('/api/project/:projectId/step/:stepOrder/ai-modify', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, stepOrder } = req.params;
+    const { currentSlide, modification, availableVisualFunctions, modifyType = 'content' } = req.body;
+    
+    console.log(`🤖 AI modification request for step ${stepOrder} in project: ${projectId}`);
+    console.log(`📝 Modification type: ${modifyType}`);
+    console.log(`📝 Request: ${modification}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: 'AI service not configured'
+      });
+    }
+    
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+    
+    let aiPrompt;
+    let responseHandler;
+    
+    if (modifyType === 'visual' && currentSlide.visual?.type) {
+      // Visual function modification
+      const currentVisualFunction = projectData.visualFunctions.find(
+        vf => vf.function_name === currentSlide.visual.type
+      );
+      
+      if (!currentVisualFunction) {
+        return res.status(404).json({
+          success: false,
+          error: 'Visual function not found'
+        });
+      }
+      
+      aiPrompt = `You are an expert at writing HTML5 Canvas drawing functions for educational videos.
+
+CURRENT VISUAL FUNCTION CODE:
+\`\`\`javascript
+${currentVisualFunction.function_code}
+\`\`\`
+
+SLIDE CONTEXT:
+- Title: ${currentSlide.title}
+- Content: ${currentSlide.content || ''}
+- Additional Content: ${currentSlide.content2 || ''}
+- Current Parameters: ${JSON.stringify(currentSlide.visual.params || [])}
+
+USER REQUEST: ${modification}
+
+REQUIREMENTS:
+1. Return ONLY the updated JavaScript function code - no explanations, no markdown, no wrapper text
+2. The function should accept (ctx, ...params) as parameters where params match the slide's visual.params
+3. Keep the same function signature and name: ${currentVisualFunction.function_name}
+4. Use canvas drawing commands: ctx.beginPath, ctx.arc, ctx.fillRect, ctx.strokeRect, etc.
+5. Ensure all coordinates fit within the media area: x: 200, y: 200, width: 600, height: 400
+6. Use ctx.save() and ctx.restore() to preserve context state
+7. Make the drawing educational and clear, relevant to the slide content
+8. If parameters are used, make sure they enhance the visualization appropriately
+9. Use colors that are educational and clear: blues, greens, oranges for different elements
+
+RESPOND WITH ONLY THE JAVASCRIPT FUNCTION CODE:`;
+
+      responseHandler = async (aiResponse) => {
+        let updatedCode = aiResponse.trim();
+        
+        // Clean up the response - remove any markdown formatting
+        if (updatedCode.startsWith('```javascript')) {
+          updatedCode = updatedCode.replace(/^```javascript\n/, '').replace(/\n```$/, '');
+        } else if (updatedCode.startsWith('```')) {
+          updatedCode = updatedCode.replace(/^```\n/, '').replace(/\n```$/, '');
+        }
+        
+        // Validate the function code
+        try {
+          new Function('ctx', 'param1', 'param2', 'param3', updatedCode);
+        } catch (syntaxError) {
+          throw new Error(`Generated function has syntax error: ${syntaxError.message}`);
+        }
+        
+        // Update the visual function in database
+        await supabase
+          .from('visual_functions')
+          .update({
+            function_code: updatedCode,
+            updated_at: new Date()
+          })
+          .eq('project_id', projectId)
+          .eq('function_name', currentVisualFunction.function_name);
+        
+        return {
+          modifiedSlide: currentSlide, // Slide structure stays the same
+          updatedVisualFunction: {
+            name: currentVisualFunction.function_name,
+            code: updatedCode
+          },
+          message: 'Visual function updated by AI'
+        };
+      };
+      
+    } else {
+      // Content modification (existing functionality)
+      aiPrompt = `You are helping modify an educational lesson slide. Here's the current slide content:
+
+${JSON.stringify(currentSlide, null, 2)}
+
+Available visual functions: ${availableVisualFunctions.join(', ')}
+
+SLIDE CONTEXT:
+- This is step ${stepOrder} in an educational video
+- Speaker: ${currentSlide.speaker}
+- Current visual: ${currentSlide.visual?.type || 'none'}
+
+USER REQUEST: "${modification}"
+
+Please modify the slide according to the user's request and return ONLY a valid JSON object with the modified slide data. Keep the same structure but update the relevant fields based on the modification request.
+
+IMPORTANT: 
+- Only return valid JSON, no explanations, no markdown formatting
+- Keep all existing fields unless specifically asked to change them
+- If visual functions are mentioned, use only those from the available list: ${availableVisualFunctions.join(', ')}
+- Ensure narration text is natural and educational
+- If changing visual parameters, provide appropriate values in the visual.params array
+- Maintain educational tone and clarity
+
+RESPOND WITH ONLY THE JSON OBJECT:`;
+
+      responseHandler = async (aiResponse) => {
+        let modifiedSlide;
+        try {
+          const cleanJson = aiResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+          modifiedSlide = JSON.parse(cleanJson);
+        } catch (parseError) {
+          throw new Error('AI returned invalid JSON format');
+        }
+        
+        return {
+          modifiedSlide: modifiedSlide,
+          message: 'Slide content modified by AI'
+        };
+      };
+    }
+    
+    // Call Claude API
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: modifyType === 'visual' ? 4000 : 1000,
+      messages: [
+        { role: "user", content: aiPrompt }
+      ]
+    });
+    
+    if (!message.content || !message.content[0]) {
+      throw new Error('No response from AI service');
+    }
+    
+    const aiResponse = message.content[0].text;
+    console.log(`✅ AI generated response (${aiResponse.length} characters)`);
+    
+    // Process the response based on modification type
+    const result = await responseHandler(aiResponse);
+    
+    res.json({
+      success: true,
+      ...result
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in AI modification:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'AI modification failed'
+    });
+  }
+});
+
+// PDF export endpoint (add after AI modification endpoint)
+app.get('/api/project/:projectId/export-pdf', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    console.log(`📄 PDF export request for project: ${projectId}`);
+    
+    // Get project data
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Simple PDF generation (you might want to use a proper PDF library like puppeteer or jsPDF)
+    const htmlContent = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>${projectData.project.title} - Script</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; }
+        .header { text-align: center; margin-bottom: 30px; }
+        .step { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
+        .step-title { font-size: 18px; font-weight: bold; color: #1a5276; margin-bottom: 10px; }
+        .speaker { color: #666; font-size: 14px; margin-bottom: 10px; }
+        .content { margin-bottom: 15px; }
+        .narration { background: #f8f9fa; padding: 15px; border-radius: 5px; font-style: italic; }
+        .visual-info { color: #e74c3c; font-size: 12px; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>${projectData.project.title}</h1>
+        <p>Educational Video Script</p>
+        <p>Generated on: ${new Date().toLocaleDateString()}</p>
+    </div>
+    
+    ${projectData.lessonSteps.map((step, index) => `
+        <div class="step">
+            <div class="step-title">Step ${index + 1}: ${step.title || 'Untitled'}</div>
+            <div class="speaker">Speaker: ${step.speaker}</div>
+            ${step.content ? `<div class="content"><strong>Content:</strong> ${step.content}</div>` : ''}
+            ${step.content2 ? `<div class="content"><strong>Additional Content:</strong> ${step.content2}</div>` : ''}
+            <div class="narration">
+                <strong>Narration:</strong><br>
+                ${step.narration || 'No narration'}
+            </div>
+            ${step.visual_type ? `<div class="visual-info">Visual: ${step.visual_type}</div>` : ''}
+        </div>
+    `).join('')}
+</body>
+</html>`;
+    
+    // For now, return HTML (you should implement proper PDF generation)
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Content-Type', 'text/html');
+    res.setHeader('Content-Disposition', `attachment; filename="${projectData.project.title.replace(/[^a-zA-Z0-9]/g, '_')}_script.html"`);
+    res.send(htmlContent);
+   
+   // TODO: Implement proper PDF generation using puppeteer or similar
+   // For now, this returns HTML that can be printed to PDF by the browser
+   
+ } catch (error) {
+   console.error('❌ Error exporting PDF:', error);
+   res.status(500).json({
+     success: false,
+     error: error.message || 'PDF export failed'
+   });
+ }
+});
+
+// Enhanced video generation endpoint (replace the existing generate-video endpoint)
+app.post('/api/generate-video', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.body;
+    console.log(`🔧 Enhanced video generation request for project: ${projectId}`);
+    if (!projectId) {
+      return res.status(400).json({
+        success: false,
+        error: 'Project ID is required'
+      });
+    }
+    
+    console.log(`⚡ Enhanced video generation for project: ${projectId}`);
+    
+    // Get project data with all related information
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    
+    if (!projectData || !projectData.project) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    if (projectData.project.status !== 'script_ready' && projectData.project.status !== 'completed') {
+      return res.status(400).json({
+        success: false,
+        error: 'Project script not ready for video generation'
+      });
+    }
+    
+    // Check if video already exists and is recent
+    const existingVideo = projectData.videos.find(v => v.created_at);
+    const lastUpdated = new Date(projectData.project.updated_at);
+    
+    if (existingVideo) {
+      const videoCreated = new Date(existingVideo.created_at);
+      if (videoCreated > lastUpdated) {
+        console.log('📹 Using existing video (no changes detected)');
+        return res.json({
+          success: true,
+          message: 'Video already exists and is up to date',
+          projectId: projectId,
+          storagePath: existingVideo.storage_path,
+          duration: existingVideo.duration,
+          useExisting: true
+        });
+      }
+    }
+    
+    // Create temporary script file with enhanced audio handling
+    const tempScriptPath = await createTempScriptFile(projectData);
+    let tempVideoPath = null;
+    const videoOutputDir = `/tmp/output/${projectId}`;
+    
+    try {
+      await fs.mkdir(videoOutputDir, { recursive: true });
+      
+      const videoName = `video_${Date.now()}`;
+      const generatorOptions = {
+        outputDir: videoOutputDir,
+        videoName: videoName,
+        reuseExistingAudio: true, // Flag to reuse existing audio files
+        projectData: projectData // Pass project data for audio reuse
+      };
+      
+      const generator = new FixedOptimizedVideoGenerator(tempScriptPath, {
+        ...generatorOptions,
+        supabase: supabase,
+        userId: req.user.id,
+        projectId: projectId
+      });
+      
+      tempVideoPath = await generator.generate();
+      
+      console.log(`✅ Enhanced video generation complete: ${tempVideoPath}`);
+      
+      // Upload new video to storage
+      const videoFileName = `${projectId}_${Date.now()}.mp4`;
+      const storagePath = await StorageService.uploadFile(
+        'video-files',
+        videoFileName,
+        tempVideoPath,
+        req.user.id
+      );
+      
+      console.log(`✅ Video uploaded to storage: ${storagePath}`);
+      
+      // Calculate duration
+      const videoDuration = calculateVideoDuration(tempVideoPath);
+      
+      // Delete old video if exists
+      if (existingVideo?.storage_path) {
+        try {
+          await StorageService.deleteFile(existingVideo.bucket_name, existingVideo.storage_path);
+          await supabase
+            .from('videos')
+            .delete()
+            .eq('project_id', projectId);
+        } catch (deleteError) {
+          console.warn('⚠️ Could not delete old video:', deleteError.message);
+        }
+      }
+      
+      // Save new video to database
+      await DatabaseService.saveVideo(
+        projectId,
+        req.user.id,
+        storagePath,
+        'video-files',
+        videoDuration
+      );
+      
+      monitoring.trackVideoGeneration(projectId, req.user.id, videoDuration);
+      
+      res.json({
+        success: true,
+        message: 'Enhanced video generated successfully!',
+        projectId: projectId,
+        storagePath: storagePath,
+        duration: videoDuration,
+        audioFilesReused: projectData.audioFiles.length
+      });
+      
+    } finally {
+      try {
+        await tmpCleaner.clearAll();
+        console.log('✅ /tmp cleanup completed');
+      } catch (cleanupError) {
+        console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
+      }
+    }
+  } catch (error) {
+    console.error('❌ Error in enhanced video generation:', error);
+    monitoring.error('Enhanced video generation failed', error, { userId: req.user.id });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Enhanced video generation failed'
+    });
+  }
+});
+
+// 1. Update Visual Function Endpoint
+app.put('/api/project/:projectId/visual-function/:functionName', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, functionName } = req.params;
+    const { functionCode } = req.body;
+    
+    console.log(`🎨 Updating visual function ${functionName} for project: ${projectId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Validate function code (basic syntax check)
+    try {
+      new Function('ctx', 'param1', 'param2', 'param3', functionCode);
+    } catch (syntaxError) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid function syntax: ${syntaxError.message}`
+      });
+    }
+    
+    // Update visual function in database
+    const { data: visualFunction, error } = await supabase
+      .from('visual_functions')
+      .upsert([{
+        project_id: projectId,
+        function_name: functionName,
+        function_code: functionCode,
+        updated_at: new Date()
+      }])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      message: 'Visual function updated successfully',
+      visualFunction: visualFunction
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating visual function:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update visual function'
+    });
+  }
+});
+
+// 2. Add New Visual Function Endpoint
+app.post('/api/project/:projectId/visual-function', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { functionName, functionCode } = req.body;
+    
+    if (!functionName || !functionCode) {
+      return res.status(400).json({
+        success: false,
+        error: 'Function name and code are required'
+      });
+    }
+    
+    console.log(`🎨 Adding new visual function ${functionName} for project: ${projectId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Validate function code
+    try {
+      new Function('ctx', 'param1', 'param2', 'param3', functionCode);
+    } catch (syntaxError) {
+      return res.status(400).json({
+        success: false,
+        error: `Invalid function syntax: ${syntaxError.message}`
+      });
+    }
+    
+    // Check if function name already exists
+    const { data: existing } = await supabase
+      .from('visual_functions')
+      .select('id')
+      .eq('project_id', projectId)
+      .eq('function_name', functionName)
+      .single();
+    
+    if (existing) {
+      return res.status(409).json({
+        success: false,
+        error: 'Function with this name already exists'
+      });
+    }
+    
+    // Insert new visual function
+    const { data: visualFunction, error } = await supabase
+      .from('visual_functions')
+      .insert([{
+        project_id: projectId,
+        function_name: functionName,
+        function_code: functionCode
+      }])
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      message: 'Visual function added successfully',
+      visualFunction: visualFunction
+    });
+    
+  } catch (error) {
+    console.error('❌ Error adding visual function:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to add visual function'
+    });
+  }
+});
+
+// 3. Delete Visual Function Endpoint
+app.delete('/api/project/:projectId/visual-function/:functionName', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, functionName } = req.params;
+    
+    console.log(`🗑️ Deleting visual function ${functionName} for project: ${projectId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Check if function is being used in lesson steps
+    const { data: usedInSteps } = await supabase
+      .from('lesson_steps')
+      .select('step_order, title')
+      .eq('project_id', projectId)
+      .eq('visual_type', functionName);
+    
+    if (usedInSteps && usedInSteps.length > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `Cannot delete function: used in steps ${usedInSteps.map(s => s.step_order).join(', ')}`,
+        usedInSteps: usedInSteps
+      });
+    }
+    
+    // Delete visual function
+    const { error } = await supabase
+      .from('visual_functions')
+      .delete()
+      .eq('project_id', projectId)
+      .eq('function_name', functionName);
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      message: 'Visual function deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error deleting visual function:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to delete visual function'
+    });
+  }
+});
+
+// 4. Update Speaker Configuration Endpoint
+app.put('/api/project/:projectId/speaker/:speakerKey', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, speakerKey } = req.params;
+    const { voice, model, name, color, gender } = req.body;
+    
+    console.log(`👤 Updating speaker ${speakerKey} for project: ${projectId}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Update speaker in database
+    const { data: speaker, error } = await supabase
+      .from('speakers')
+      .update({
+        voice: voice,
+        model: model,
+        name: name,
+        color: color,
+        gender: gender,
+        updated_at: new Date()
+      })
+      .eq('project_id', projectId)
+      .eq('speaker_key', speakerKey)
+      .select()
+      .single();
+    
+    if (error) throw error;
+    
+    // Check if voice/model changed - if so, mark for audio regeneration
+    const needsAudioRegeneration = voice !== speaker.voice || model !== speaker.model;
+    
+    let audioRegenerationSteps = [];
+    if (needsAudioRegeneration) {
+      // Find all steps using this speaker
+      const { data: stepsWithSpeaker } = await supabase
+        .from('lesson_steps')
+        .select('step_order, title')
+        .eq('project_id', projectId)
+        .eq('speaker', speakerKey);
+      
+      audioRegenerationSteps = stepsWithSpeaker || [];
+    }
+    
+    res.json({
+      success: true,
+      message: 'Speaker updated successfully',
+      speaker: speaker,
+      needsAudioRegeneration: needsAudioRegeneration,
+      affectedSteps: audioRegenerationSteps
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating speaker:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update speaker'
+    });
+  }
+});
+
+// 5. Bulk Audio Regeneration Endpoint
+app.post('/api/project/:projectId/regenerate-audio', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { stepOrders, reason } = req.body; // Array of step orders to regenerate
+    
+    console.log(`🎵 Bulk audio regeneration for project: ${projectId}, steps: ${stepOrders.join(', ')}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    if (!process.env.SMALLEST_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: 'Audio generation service not configured'
+      });
+    }
+    
+    const results = [];
+    
+    for (const stepOrder of stepOrders) {
+      try {
+        // Get lesson step and speaker config
+        const { data: lessonStep } = await supabase
+          .from('lesson_steps')
+          .select('*')
+          .eq('project_id', projectId)
+          .eq('step_order', stepOrder)
+          .single();
+        
+        const { data: speaker } = await supabase
+          .from('speakers')
+          .select('*')
+          .eq('project_id', projectId)
+          .eq('speaker_key', lessonStep.speaker)
+          .single();
+        
+        if (!lessonStep || !speaker) {
+          results.push({
+            stepOrder: stepOrder,
+            success: false,
+            error: 'Step or speaker not found'
+          });
+          continue;
+        }
+        
+        // Generate new audio
+        const audioBuffer = await generateAudioWithSmallestAi(
+          lessonStep.narration, 
+          {
+            voice: speaker.voice,
+            model: speaker.model
+          }
+        );
+        
+        // Save temporary audio file
+        const tempAudioPath = `/tmp/temp_audio_${projectId}_${stepOrder}_${Date.now()}.wav`;
+        await fs.writeFile(tempAudioPath, audioBuffer);
+        
+        // Upload to storage
+        const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
+        const storagePath = await StorageService.uploadFile(
+          'audio-files',
+          audioFileName,
+          tempAudioPath,
+          req.user.id
+        );
+        
+        // Get audio duration
+        const duration = await getAudioDuration(tempAudioPath);
+        
+        // Delete old audio file
+        const { data: oldAudio } = await supabase
+          .from('audio_files')
+          .select('storage_path, bucket_name')
+          .eq('lesson_step_id', lessonStep.id)
+          .single();
+        
+        if (oldAudio?.storage_path) {
+          await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+        }
+        
+        // Update audio file record
+        await supabase
+          .from('audio_files')
+          .upsert([{
+            lesson_step_id: lessonStep.id,
+            storage_path: storagePath,
+            bucket_name: 'audio-files',
+            duration: duration
+          }]);
+        
+        // Clean up temp file
+        await fs.unlink(tempAudioPath);
+        
+        results.push({
+          stepOrder: stepOrder,
+          success: true,
+          duration: duration
+        });
+        
+      } catch (stepError) {
+        console.error(`❌ Audio regeneration failed for step ${stepOrder}:`, stepError);
+        results.push({
+          stepOrder: stepOrder,
+          success: false,
+          error: stepError.message
+        });
+      }
+    }
+    
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.length - successCount;
+    
+    res.json({
+      success: true,
+      message: `Audio regeneration completed: ${successCount} successful, ${failureCount} failed`,
+      results: results,
+      reason: reason
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in bulk audio regeneration:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Bulk audio regeneration failed'
+    });
+  }
+});
+
+// 6. Get Project Visual Functions (for editing interface)
+app.get('/api/project/:projectId/visual-functions', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    const { data: visualFunctions, error } = await supabase
+      .from('visual_functions')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('function_name');
+    
+    if (error) throw error;
+    
+    res.json({
+      success: true,
+      visualFunctions: visualFunctions || []
+    });
+    
+  } catch (error) {
+    console.error('❌ Error getting visual functions:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to get visual functions'
+    });
+  }
+});
+
 
 // Manual cleanup endpoint
 app.post('/api/cleanup', authenticateService, cleanupMiddleware.cleanupEndpoint);

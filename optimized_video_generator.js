@@ -596,6 +596,46 @@ class FixedOptimizedVideoGenerator {
       throw error;
     }
   }
+  // Add this method to FixedOptimizedVideoGenerator class in optimized_video_generator.js
+  async downloadExistingAudio(projectData) {
+    if (!this.supabase || !projectData.audioFiles || projectData.audioFiles.length === 0) {
+      return;
+    }
+
+    console.log('🎵 Downloading existing audio files from storage...');
+    
+    for (const audioFile of projectData.audioFiles) {
+      try {
+        // Find corresponding lesson step
+        const lessonStep = projectData.lessonSteps.find(step => step.id === audioFile.lesson_step_id);
+        if (!lessonStep) continue;
+        
+        // Download audio file from storage
+        const { data: audioBlob, error } = await this.supabase.storage
+          .from(audioFile.bucket_name)
+          .download(audioFile.storage_path);
+        
+        if (error) throw error;
+        
+        // Save to local file system
+        const localAudioPath = path.join(this.AUDIO_DIR, `step_${lessonStep.step_order.toString().padStart(3, '0')}_${lessonStep.speaker}.wav`);
+        const arrayBuffer = await audioBlob.arrayBuffer();
+        await fs.writeFile(localAudioPath, Buffer.from(arrayBuffer));
+        
+        // Update lesson step with audio info
+        const stepIndex = lessonStep.step_order - 1;
+        if (this.lessonSteps[stepIndex]) {
+          this.lessonSteps[stepIndex].audioPath = localAudioPath;
+          this.lessonSteps[stepIndex].actualAudioDuration = audioFile.duration || 0;
+        }
+        
+        console.log(`   ✅ Downloaded audio for step ${lessonStep.step_order}`);
+        
+      } catch (error) {
+        console.error(`   ❌ Failed to download audio for step:`, error.message);
+      }
+    }
+  }
 
   calculateEffectiveDuration(step, previousStep = null) {
     let duration = Math.max(step.visualDuration, step.actualAudioDuration || 0);
