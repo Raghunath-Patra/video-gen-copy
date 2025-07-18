@@ -1744,6 +1744,120 @@ RESPOND WITH ONLY THE JSON OBJECT:`;
   }
 });
 
+// AI modification for visual functions endpoint
+app.post('/api/project/:projectId/visual-function/:functionName/ai-modify', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, functionName } = req.params;
+    const { currentCode, modification } = req.body;
+    
+    console.log(`🤖 AI visual function modification for ${functionName} in project: ${projectId}`);
+    console.log(`📝 Request: ${modification}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    // Verify function exists
+    const visualFunction = projectData.visualFunctions.find(
+      vf => vf.function_name === functionName
+    );
+    
+    if (!visualFunction) {
+      return res.status(404).json({
+        success: false,
+        error: 'Visual function not found'
+      });
+    }
+    
+    if (!process.env.ANTHROPIC_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: 'AI service not configured'
+      });
+    }
+    
+    const Anthropic = require('@anthropic-ai/sdk');
+    const anthropic = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+    
+    const aiPrompt = `You are an expert at writing HTML5 Canvas drawing functions for educational videos.
+
+CURRENT VISUAL FUNCTION CODE:
+\`\`\`javascript
+${currentCode}
+\`\`\`
+
+FUNCTION NAME: ${functionName}
+
+USER REQUEST: ${modification}
+
+REQUIREMENTS:
+1. Return ONLY the updated JavaScript function code - no explanations, no markdown, no wrapper text
+2. The function should accept (ctx, ...params) as parameters
+3. Keep the same function signature and name: ${functionName}
+4. Use canvas drawing commands: ctx.beginPath, ctx.arc, ctx.fillRect, ctx.strokeRect, etc.
+5. Ensure all coordinates fit within the media area: x: 200, y: 200, width: 600, height: 400
+6. Use ctx.save() and ctx.restore() to preserve context state
+7. Make the drawing educational and clear
+8. Use colors that are educational and clear: blues, greens, oranges for different elements
+9. If the modification asks for specific changes, implement them while maintaining the function structure
+10. Ensure the code is syntactically correct and will execute without errors
+
+RESPOND WITH ONLY THE JAVASCRIPT FUNCTION CODE:`;
+
+    // Call Claude API
+    const message = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4000,
+      messages: [
+        { role: "user", content: aiPrompt }
+      ]
+    });
+    
+    if (!message.content || !message.content[0]) {
+      throw new Error('No response from AI service');
+    }
+    
+    let updatedCode = message.content[0].text.trim();
+    
+    // Clean up the response - remove any markdown formatting
+    if (updatedCode.startsWith('```javascript')) {
+      updatedCode = updatedCode.replace(/^```javascript\n/, '').replace(/\n```$/, '');
+    } else if (updatedCode.startsWith('```')) {
+      updatedCode = updatedCode.replace(/^```\n/, '').replace(/\n```$/, '');
+    }
+    
+    // Validate the function code
+    try {
+      new Function('ctx', 'param1', 'param2', 'param3', updatedCode);
+    } catch (syntaxError) {
+      throw new Error(`Generated function has syntax error: ${syntaxError.message}`);
+    }
+    
+    console.log(`✅ AI generated valid visual function code (${updatedCode.length} characters)`);
+    
+    res.json({
+      success: true,
+      updatedCode: updatedCode,
+      functionName: functionName,
+      message: 'Visual function modified by AI'
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in AI visual function modification:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'AI visual function modification failed'
+    });
+  }
+});
+
 // PDF export endpoint (add after AI modification endpoint)
 app.get('/api/project/:projectId/export-pdf', authenticateService, extractUserInfo, async (req, res) => {
   try {
