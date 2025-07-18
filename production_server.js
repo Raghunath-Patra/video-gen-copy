@@ -13,6 +13,7 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const { createClient } = require('@supabase/supabase-js');
 const fetch = require('node-fetch'); // Add this dependency
+const { spawn } = require('child_process');
 
 // Import your existing modules
 const EnhancedContentGenerator = require('./content_generator');
@@ -1340,6 +1341,13 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
       success: false,
       error: error.message || 'Failed to update lesson step'
     });
+  }finally {
+    try {
+      await tmpCleaner.clearAll();
+      console.log('✅ /tmp cleanup completed');
+    } catch (cleanupError) {
+      console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
+    }
   }
 });
 

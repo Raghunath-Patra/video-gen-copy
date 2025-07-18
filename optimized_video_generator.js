@@ -637,6 +637,146 @@ class FixedOptimizedVideoGenerator {
     }
   }
 
+  async checkAndDownloadExistingAudio() {
+    if (!this.supabase || !this.projectId) {
+      console.log('🔇 No database connection - will generate all audio locally');
+      return;
+    }
+
+    console.log('🔍 Checking for existing audio files in database...');
+    
+    try {
+      // Get all lesson steps with their audio files
+      const { data: lessonStepsWithAudio, error } = await this.supabase
+        .from('lesson_steps')
+        .select(`
+          id,
+          step_order,
+          speaker,
+          narration,
+          audio_files (
+            id,
+            storage_path,
+            bucket_name,
+            duration,
+            created_at
+          )
+        `)
+        .eq('project_id', this.projectId)
+        .order('step_order');
+      
+      if (error) throw error;
+      
+      let existingCount = 0;
+      let missingCount = 0;
+      
+      for (const dbStep of lessonStepsWithAudio) {
+        const stepIndex = dbStep.step_order - 1;
+        const localStep = this.lessonSteps[stepIndex];
+        
+        if (!localStep) continue;
+        
+        // Check if audio file exists in database
+        if (dbStep.audio_files && dbStep.audio_files.length > 0) {
+          const audioFile = dbStep.audio_files[0]; // Get the most recent one
+          
+          try {
+            // Download audio file from storage
+            const { data: audioBlob, error: downloadError } = await this.supabase.storage
+              .from(audioFile.bucket_name)
+              .download(audioFile.storage_path);
+            
+            if (downloadError) throw downloadError;
+            
+            // Save to local file system
+            const localAudioPath = path.join(
+              this.AUDIO_DIR, 
+              `step_${dbStep.step_order.toString().padStart(3, '0')}_${dbStep.speaker}.wav`
+            );
+            
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            await fs.writeFile(localAudioPath, Buffer.from(arrayBuffer));
+            
+            // Apply volume boost if configured
+            let finalAudioPath = localAudioPath;
+            if (this.config.APPLY_VOLUME_BOOST) {
+              const boostedFileName = path.basename(localAudioPath).replace('.wav', '_boosted.wav');
+              const boostedPath = path.join(this.TEMP_AUDIO_BOOSTED_DIR, boostedFileName);
+              finalAudioPath = await this.boostAudioVolume(localAudioPath, boostedPath, this.config.VOLUME_BOOST_DB);
+              localStep.boostedAudioPath = finalAudioPath;
+            }
+            
+            // Update lesson step with audio info
+            localStep.audioPath = finalAudioPath;
+            localStep.actualAudioDuration = audioFile.duration || await this.getAudioDuration(finalAudioPath);
+            localStep.hasExistingAudio = true;
+            
+            existingCount++;
+            console.log(`   ✅ Downloaded existing audio for step ${dbStep.step_order}`);
+            
+          } catch (downloadError) {
+            console.error(`   ⚠️ Failed to download audio for step ${dbStep.step_order}:`, downloadError.message);
+            localStep.hasExistingAudio = false;
+            missingCount++;
+          }
+        } else {
+          localStep.hasExistingAudio = false;
+          missingCount++;
+          console.log(`   ❌ No audio found for step ${dbStep.step_order}`);
+        }
+      }
+      
+      console.log(`📊 Audio file status:`);
+      console.log(`   Existing audio files: ${existingCount}`);
+      console.log(`   Missing audio files: ${missingCount}`);
+      
+      return { existingCount, missingCount };
+      
+    } catch (error) {
+      console.error('❌ Error checking existing audio files:', error.message);
+      // If there's an error, mark all as missing so they get generated
+      this.lessonSteps.forEach(step => {
+        step.hasExistingAudio = false;
+      });
+      return { existingCount: 0, missingCount: this.lessonSteps.length };
+    }
+  }
+
+  // Enhanced method to generate only missing audio files
+  async generateMissingAudioParallel() {
+    if (!this.smallestAiToken) {
+      console.log('🔇 Skipping audio generation (no API token)');
+      return;
+    }
+
+    // Find steps that need audio generation
+    const stepsNeedingAudio = this.lessonSteps
+      .map((step, index) => ({ step, index }))
+      .filter(({ step }) => !step.hasExistingAudio);
+
+    if (stepsNeedingAudio.length === 0) {
+      console.log('✅ All audio files already exist - no generation needed');
+      return;
+    }
+
+    console.log(`🎤 Generating ${stepsNeedingAudio.length} missing audio files in parallel...`);
+    
+    const maxParallel = this.config.OPTIMIZATION.MAX_PARALLEL_AUDIO;
+    
+    for (let i = 0; i < stepsNeedingAudio.length; i += maxParallel) {
+      const batch = stepsNeedingAudio.slice(i, i + maxParallel);
+      const batchPromises = batch.map(({ step, index }) => 
+        this.generateSingleAudio(index, step)
+      );
+      
+      const batchNumbers = batch.map(({ index }) => index + 1);
+      console.log(`   Batch ${Math.floor(i / maxParallel) + 1}: Generating audio for steps ${batchNumbers.join(', ')}`);
+      await Promise.all(batchPromises);
+    }
+    
+    console.log('✅ Missing audio generation complete');
+  }
+
   calculateEffectiveDuration(step, previousStep = null) {
     let duration = Math.max(step.visualDuration, step.actualAudioDuration || 0);
     duration = Math.max(duration, this.config.TRANSITION_CONFIG.MIN_SLIDE_DURATION);
@@ -955,10 +1095,11 @@ class FixedOptimizedVideoGenerator {
       console.log(`💻 System: ${this.cpuCores} CPU cores`);
       console.log(`📁 Output directory: ${this.OUTPUT_DIR}`);
 
-      // PARALLEL PROCESSING: Start audio generation and frame analysis simultaneously
-      console.log('\n⚡ Phase 1: Parallel processing...');
+      // ENHANCED: Check for existing audio files first, then generate only missing ones
+      console.log('\n⚡ Phase 1: Smart audio management...');
       
-      const audioPromise = this.generateAllAudioParallel();
+      const audioStatus = await this.checkAndDownloadExistingAudio();
+      const audioPromise = this.generateMissingAudioParallel();
       const frameAnalysisPromise = this.generateUniqueFrames();
       
       // Wait for both to complete
@@ -998,7 +1139,7 @@ class FixedOptimizedVideoGenerator {
       console.log(`⚡ Processing time: ${processingTime.toFixed(2)}s`);
       console.log(`🚀 Speed ratio: ${(targetVideoDuration / processingTime).toFixed(1)}x faster than real-time!`);
       
-      // Performance summary
+      // Enhanced performance summary
       const { uniqueCount, duplicateCount } = this.analyzeFrameUniqueness();
       console.log(`\n📊 Optimization Summary:`);
       console.log(`   CPU cores: ${this.cpuCores}`);
@@ -1006,6 +1147,13 @@ class FixedOptimizedVideoGenerator {
       console.log(`   Frames reused: ${duplicateCount}`);
       console.log(`   Total video frames: ${this.lessonSteps.reduce((sum, step) => sum + Math.round(step.effectiveDuration * this.config.FPS), 0)}`);
       console.log(`   Time saved: ${duplicateCount > 0 ? 'Significant frame generation time saved!' : 'No duplicate frames found'}`);
+      
+      if (audioStatus) {
+        console.log(`\n🎵 Audio Optimization:`);
+        console.log(`   Existing audio files reused: ${audioStatus.existingCount}`);
+        console.log(`   New audio files generated: ${audioStatus.missingCount}`);
+        console.log(`   Audio time saved: ${audioStatus.existingCount > 0 ? 'Significant audio generation time saved!' : 'All audio generated fresh'}`);
+      }
       
       return this.FINAL_VIDEO;
       
