@@ -1220,6 +1220,7 @@ app.get('/api/audio/:audioId', authenticateService, extractUserInfo, async (req,
 });
 
 // Update a specific lesson step (add after existing project routes)
+// Update a specific lesson step - FIXED VERSION with proper audio cleanup
 app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId, stepOrder } = req.params;
@@ -1272,7 +1273,18 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
         const speakerConfig = speakers?.find(s => s.speaker_key === stepData.speaker);
         
         if (speakerConfig && process.env.SMALLEST_API_KEY) {
-          // Generate new audio
+          // STEP 1: Get existing audio file info BEFORE generating new one
+          const { data: oldAudio, error: fetchError } = await supabase
+            .from('audio_files')
+            .select('storage_path, bucket_name, id')
+            .eq('lesson_step_id', lessonStep.id)
+            .single();
+          
+          if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = no rows found
+            console.warn('⚠️ Error fetching old audio file info:', fetchError.message);
+          }
+          
+          // STEP 2: Generate new audio
           const audioBuffer = await generateAudioWithSmallestAi(
             stepData.narration, 
             {
@@ -1285,7 +1297,7 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
           const tempAudioPath = `/tmp/temp_audio_${Date.now()}.wav`;
           await fs.writeFile(tempAudioPath, audioBuffer);
           
-          // Upload to storage
+          // STEP 3: Upload new audio to storage
           const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
           const storagePath = await StorageService.uploadFile(
             'audio-files',
@@ -1297,30 +1309,53 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
           // Get audio duration
           const duration = await getAudioDuration(tempAudioPath);
           
-          // Delete old audio file from storage and database
-          const { data: oldAudio } = await supabase
-            .from('audio_files')
-            .select('storage_path, bucket_name')
-            .eq('lesson_step_id', lessonStep.id)
-            .single();
-          
-          if (oldAudio?.storage_path) {
-            await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+          // STEP 4: Delete old audio file from storage BEFORE updating database
+          if (oldAudio && oldAudio.storage_path) {
+            try {
+              console.log(`🗑️ Deleting old audio file from storage: ${oldAudio.storage_path}`);
+              await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+              console.log(`✅ Old audio file deleted from storage successfully`);
+            } catch (deleteError) {
+              console.error(`❌ Failed to delete old audio file from storage:`, deleteError.message);
+              // Continue anyway - don't fail the entire operation
+            }
           }
           
-          // Update audio file record
-          await supabase
-            .from('audio_files')
-            .upsert([{
-              lesson_step_id: lessonStep.id,
-              storage_path: storagePath,
-              bucket_name: 'audio-files',
-              duration: duration
-            }]);
+          // STEP 5: Update/Insert audio file record in database
+          if (oldAudio && oldAudio.id) {
+            // Update existing record
+            const { error: updateError } = await supabase
+              .from('audio_files')
+              .update({
+                storage_path: storagePath,
+                bucket_name: 'audio-files',
+                duration: duration,
+                updated_at: new Date()
+              })
+              .eq('id', oldAudio.id);
+            
+            if (updateError) throw updateError;
+            console.log(`✅ Updated existing audio record in database`);
+          } else {
+            // Insert new record
+            const { error: insertError } = await supabase
+              .from('audio_files')
+              .insert([{
+                lesson_step_id: lessonStep.id,
+                storage_path: storagePath,
+                bucket_name: 'audio-files',
+                duration: duration
+              }]);
+            
+            if (insertError) throw insertError;
+            console.log(`✅ Created new audio record in database`);
+          }
           
           // Clean up temp file
           await fs.unlink(tempAudioPath);
           audioGenerated = true;
+          
+          console.log(`✅ Audio regeneration complete for step ${stepOrder}`);
         }
       } catch (audioError) {
         console.error('❌ Audio regeneration failed:', audioError);
@@ -1340,6 +1375,175 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
     res.status(500).json({
       success: false,
       error: error.message || 'Failed to update lesson step'
+    });
+  }finally {
+    try {
+      await tmpCleaner.clearAll();
+      console.log('✅ /tmp cleanup completed');
+    } catch (cleanupError) {
+      console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
+    }
+  }
+});
+
+// Also fix the bulk audio regeneration endpoint
+app.post('/api/project/:projectId/regenerate-audio', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId } = req.params;
+    const { stepOrders, reason } = req.body; // Array of step orders to regenerate
+    
+    console.log(`🎵 Bulk audio regeneration for project: ${projectId}, steps: ${stepOrders.join(', ')}`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({
+        success: false,
+        error: 'Project not found'
+      });
+    }
+    
+    if (!process.env.SMALLEST_API_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: 'Audio generation service not configured'
+      });
+    }
+    
+    const results = [];
+    
+    for (const stepOrder of stepOrders) {
+      try {
+        // Get lesson step and speaker config
+        const { data: lessonStep } = await supabase
+          .from('lesson_steps')
+          .select('*')
+          .eq('project_id', projectId)
+          .eq('step_order', stepOrder)
+          .single();
+        
+        const { data: speaker } = await supabase
+          .from('speakers')
+          .select('*')
+          .eq('project_id', projectId)
+          .eq('speaker_key', lessonStep.speaker)
+          .single();
+        
+        if (!lessonStep || !speaker) {
+          results.push({
+            stepOrder: stepOrder,
+            success: false,
+            error: 'Step or speaker not found'
+          });
+          continue;
+        }
+        
+        // STEP 1: Get existing audio file info BEFORE generating new one
+        const { data: oldAudio, error: fetchError } = await supabase
+          .from('audio_files')
+          .select('storage_path, bucket_name, id')
+          .eq('lesson_step_id', lessonStep.id)
+          .single();
+        
+        if (fetchError && fetchError.code !== 'PGRST116') {
+          console.warn(`⚠️ Error fetching old audio for step ${stepOrder}:`, fetchError.message);
+        }
+        
+        // STEP 2: Generate new audio
+        const audioBuffer = await generateAudioWithSmallestAi(
+          lessonStep.narration, 
+          {
+            voice: speaker.voice,
+            model: speaker.model
+          }
+        );
+        
+        // Save temporary audio file
+        const tempAudioPath = `/tmp/temp_audio_${projectId}_${stepOrder}_${Date.now()}.wav`;
+        await fs.writeFile(tempAudioPath, audioBuffer);
+        
+        // STEP 3: Upload to storage
+        const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
+        const storagePath = await StorageService.uploadFile(
+          'audio-files',
+          audioFileName,
+          tempAudioPath,
+          req.user.id
+        );
+        
+        // Get audio duration
+        const duration = await getAudioDuration(tempAudioPath);
+        
+        // STEP 4: Delete old audio file from storage BEFORE updating database
+        if (oldAudio && oldAudio.storage_path) {
+          try {
+            console.log(`🗑️ Deleting old audio file from storage: ${oldAudio.storage_path}`);
+            await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+            console.log(`✅ Old audio file deleted from storage for step ${stepOrder}`);
+          } catch (deleteError) {
+            console.error(`❌ Failed to delete old audio file from storage for step ${stepOrder}:`, deleteError.message);
+            // Continue anyway
+          }
+        }
+        
+        // STEP 5: Update/Insert audio file record
+        if (oldAudio && oldAudio.id) {
+          // Update existing record
+          await supabase
+            .from('audio_files')
+            .update({
+              storage_path: storagePath,
+              bucket_name: 'audio-files',
+              duration: duration,
+              updated_at: new Date()
+            })
+            .eq('id', oldAudio.id);
+        } else {
+          // Insert new record
+          await supabase
+            .from('audio_files')
+            .insert([{
+              lesson_step_id: lessonStep.id,
+              storage_path: storagePath,
+              bucket_name: 'audio-files',
+              duration: duration
+            }]);
+        }
+        
+        // Clean up temp file
+        await fs.unlink(tempAudioPath);
+        
+        results.push({
+          stepOrder: stepOrder,
+          success: true,
+          duration: duration
+        });
+        
+      } catch (stepError) {
+        console.error(`❌ Audio regeneration failed for step ${stepOrder}:`, stepError);
+        results.push({
+          stepOrder: stepOrder,
+          success: false,
+          error: stepError.message
+        });
+      }
+    }
+    
+    const successCount = results.filter(r => r.success).length;
+    const failureCount = results.length - successCount;
+    
+    res.json({
+      success: true,
+      message: `Audio regeneration completed: ${successCount} successful, ${failureCount} failed`,
+      results: results,
+      reason: reason
+    });
+    
+  } catch (error) {
+    console.error('❌ Error in bulk audio regeneration:', error);
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Bulk audio regeneration failed'
     });
   }finally {
     try {
@@ -2010,140 +2214,140 @@ app.put('/api/project/:projectId/speaker/:speakerKey', authenticateService, extr
 });
 
 // 5. Bulk Audio Regeneration Endpoint
-app.post('/api/project/:projectId/regenerate-audio', authenticateService, extractUserInfo, async (req, res) => {
-  try {
-    const { projectId } = req.params;
-    const { stepOrders, reason } = req.body; // Array of step orders to regenerate
+// app.post('/api/project/:projectId/regenerate-audio', authenticateService, extractUserInfo, async (req, res) => {
+//   try {
+//     const { projectId } = req.params;
+//     const { stepOrders, reason } = req.body; // Array of step orders to regenerate
     
-    console.log(`🎵 Bulk audio regeneration for project: ${projectId}, steps: ${stepOrders.join(', ')}`);
+//     console.log(`🎵 Bulk audio regeneration for project: ${projectId}, steps: ${stepOrders.join(', ')}`);
     
-    // Verify project ownership
-    const projectData = await DatabaseService.getProject(projectId, req.user.id);
-    if (!projectData) {
-      return res.status(404).json({
-        success: false,
-        error: 'Project not found'
-      });
-    }
+//     // Verify project ownership
+//     const projectData = await DatabaseService.getProject(projectId, req.user.id);
+//     if (!projectData) {
+//       return res.status(404).json({
+//         success: false,
+//         error: 'Project not found'
+//       });
+//     }
     
-    if (!process.env.SMALLEST_API_KEY) {
-      return res.status(500).json({
-        success: false,
-        error: 'Audio generation service not configured'
-      });
-    }
+//     if (!process.env.SMALLEST_API_KEY) {
+//       return res.status(500).json({
+//         success: false,
+//         error: 'Audio generation service not configured'
+//       });
+//     }
     
-    const results = [];
+//     const results = [];
     
-    for (const stepOrder of stepOrders) {
-      try {
-        // Get lesson step and speaker config
-        const { data: lessonStep } = await supabase
-          .from('lesson_steps')
-          .select('*')
-          .eq('project_id', projectId)
-          .eq('step_order', stepOrder)
-          .single();
+//     for (const stepOrder of stepOrders) {
+//       try {
+//         // Get lesson step and speaker config
+//         const { data: lessonStep } = await supabase
+//           .from('lesson_steps')
+//           .select('*')
+//           .eq('project_id', projectId)
+//           .eq('step_order', stepOrder)
+//           .single();
         
-        const { data: speaker } = await supabase
-          .from('speakers')
-          .select('*')
-          .eq('project_id', projectId)
-          .eq('speaker_key', lessonStep.speaker)
-          .single();
+//         const { data: speaker } = await supabase
+//           .from('speakers')
+//           .select('*')
+//           .eq('project_id', projectId)
+//           .eq('speaker_key', lessonStep.speaker)
+//           .single();
         
-        if (!lessonStep || !speaker) {
-          results.push({
-            stepOrder: stepOrder,
-            success: false,
-            error: 'Step or speaker not found'
-          });
-          continue;
-        }
+//         if (!lessonStep || !speaker) {
+//           results.push({
+//             stepOrder: stepOrder,
+//             success: false,
+//             error: 'Step or speaker not found'
+//           });
+//           continue;
+//         }
         
-        // Generate new audio
-        const audioBuffer = await generateAudioWithSmallestAi(
-          lessonStep.narration, 
-          {
-            voice: speaker.voice,
-            model: speaker.model
-          }
-        );
+//         // Generate new audio
+//         const audioBuffer = await generateAudioWithSmallestAi(
+//           lessonStep.narration, 
+//           {
+//             voice: speaker.voice,
+//             model: speaker.model
+//           }
+//         );
         
-        // Save temporary audio file
-        const tempAudioPath = `/tmp/temp_audio_${projectId}_${stepOrder}_${Date.now()}.wav`;
-        await fs.writeFile(tempAudioPath, audioBuffer);
+//         // Save temporary audio file
+//         const tempAudioPath = `/tmp/temp_audio_${projectId}_${stepOrder}_${Date.now()}.wav`;
+//         await fs.writeFile(tempAudioPath, audioBuffer);
         
-        // Upload to storage
-        const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
-        const storagePath = await StorageService.uploadFile(
-          'audio-files',
-          audioFileName,
-          tempAudioPath,
-          req.user.id
-        );
+//         // Upload to storage
+//         const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
+//         const storagePath = await StorageService.uploadFile(
+//           'audio-files',
+//           audioFileName,
+//           tempAudioPath,
+//           req.user.id
+//         );
         
-        // Get audio duration
-        const duration = await getAudioDuration(tempAudioPath);
+//         // Get audio duration
+//         const duration = await getAudioDuration(tempAudioPath);
         
-        // Delete old audio file
-        const { data: oldAudio } = await supabase
-          .from('audio_files')
-          .select('storage_path, bucket_name')
-          .eq('lesson_step_id', lessonStep.id)
-          .single();
+//         // Delete old audio file
+//         const { data: oldAudio } = await supabase
+//           .from('audio_files')
+//           .select('storage_path, bucket_name')
+//           .eq('lesson_step_id', lessonStep.id)
+//           .single();
         
-        if (oldAudio?.storage_path) {
-          await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
-        }
+//         if (oldAudio?.storage_path) {
+//           await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+//         }
         
-        // Update audio file record
-        await supabase
-          .from('audio_files')
-          .upsert([{
-            lesson_step_id: lessonStep.id,
-            storage_path: storagePath,
-            bucket_name: 'audio-files',
-            duration: duration
-          }]);
+//         // Update audio file record
+//         await supabase
+//           .from('audio_files')
+//           .upsert([{
+//             lesson_step_id: lessonStep.id,
+//             storage_path: storagePath,
+//             bucket_name: 'audio-files',
+//             duration: duration
+//           }]);
         
-        // Clean up temp file
-        await fs.unlink(tempAudioPath);
+//         // Clean up temp file
+//         await fs.unlink(tempAudioPath);
         
-        results.push({
-          stepOrder: stepOrder,
-          success: true,
-          duration: duration
-        });
+//         results.push({
+//           stepOrder: stepOrder,
+//           success: true,
+//           duration: duration
+//         });
         
-      } catch (stepError) {
-        console.error(`❌ Audio regeneration failed for step ${stepOrder}:`, stepError);
-        results.push({
-          stepOrder: stepOrder,
-          success: false,
-          error: stepError.message
-        });
-      }
-    }
+//       } catch (stepError) {
+//         console.error(`❌ Audio regeneration failed for step ${stepOrder}:`, stepError);
+//         results.push({
+//           stepOrder: stepOrder,
+//           success: false,
+//           error: stepError.message
+//         });
+//       }
+//     }
     
-    const successCount = results.filter(r => r.success).length;
-    const failureCount = results.length - successCount;
+//     const successCount = results.filter(r => r.success).length;
+//     const failureCount = results.length - successCount;
     
-    res.json({
-      success: true,
-      message: `Audio regeneration completed: ${successCount} successful, ${failureCount} failed`,
-      results: results,
-      reason: reason
-    });
+//     res.json({
+//       success: true,
+//       message: `Audio regeneration completed: ${successCount} successful, ${failureCount} failed`,
+//       results: results,
+//       reason: reason
+//     });
     
-  } catch (error) {
-    console.error('❌ Error in bulk audio regeneration:', error);
-    res.status(500).json({
-      success: false,
-      error: error.message || 'Bulk audio regeneration failed'
-    });
-  }
-});
+//   } catch (error) {
+//     console.error('❌ Error in bulk audio regeneration:', error);
+//     res.status(500).json({
+//       success: false,
+//       error: error.message || 'Bulk audio regeneration failed'
+//     });
+//   }
+// });
 
 // 6. Get Project Visual Functions (for editing interface)
 app.get('/api/project/:projectId/visual-functions', authenticateService, extractUserInfo, async (req, res) => {

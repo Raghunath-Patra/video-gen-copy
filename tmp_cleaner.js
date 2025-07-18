@@ -9,7 +9,8 @@ class TmpCleaner {
       '/tmp/uploads',
       '/tmp/temp', 
       '/tmp/output',
-      '/tmp/*.js' // All JS files in /tmp
+      '/tmp/*.js', // All JS files in /tmp
+      '/tmp/*.wav' // The audio files in /tmp
     ];
     
     this.stats = {
