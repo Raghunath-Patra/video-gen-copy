@@ -1759,60 +1759,125 @@ app.get('/api/project/:projectId/export-pdf', authenticateService, extractUserIn
       });
     }
     
-    // Simple PDF generation (you might want to use a proper PDF library like puppeteer or jsPDF)
+    // Enhanced HTML content with better print styles
     const htmlContent = `
 <!DOCTYPE html>
 <html>
 <head>
     <title>${projectData.project.title} - Script</title>
+    <meta charset="UTF-8">
     <style>
-        body { font-family: Arial, sans-serif; margin: 40px; }
-        .header { text-align: center; margin-bottom: 30px; }
-        .step { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 8px; }
-        .step-title { font-size: 18px; font-weight: bold; color: #1a5276; margin-bottom: 10px; }
-        .speaker { color: #666; font-size: 14px; margin-bottom: 10px; }
-        .content { margin-bottom: 15px; }
-        .narration { background: #f8f9fa; padding: 15px; border-radius: 5px; font-style: italic; }
-        .visual-info { color: #e74c3c; font-size: 12px; margin-top: 10px; }
+        body { 
+            font-family: Arial, sans-serif; 
+            margin: 40px; 
+            line-height: 1.6;
+            color: #333;
+        }
+        .header { 
+            text-align: center; 
+            margin-bottom: 30px; 
+            border-bottom: 2px solid #1a5276;
+            padding-bottom: 20px;
+        }
+        .step { 
+            margin-bottom: 30px; 
+            padding: 20px; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            page-break-inside: avoid;
+        }
+        .step-title { 
+            font-size: 18px; 
+            font-weight: bold; 
+            color: #1a5276; 
+            margin-bottom: 10px; 
+        }
+        .speaker { 
+            color: #666; 
+            font-size: 14px; 
+            margin-bottom: 10px; 
+            font-weight: bold;
+        }
+        .content { 
+            margin-bottom: 15px; 
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 5px;
+        }
+        .narration { 
+            background: #e8f4fd; 
+            padding: 15px; 
+            border-radius: 5px; 
+            font-style: italic; 
+            border-left: 4px solid #1a5276;
+        }
+        .visual-info { 
+            color: #e74c3c; 
+            font-size: 12px; 
+            margin-top: 10px; 
+            font-weight: bold;
+        }
+        .print-button {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background: #1a5276;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        
+        /* Print styles */
+        @media print {
+            .print-button { display: none; }
+            body { margin: 20px; }
+            .step { page-break-inside: avoid; }
+        }
     </style>
 </head>
 <body>
+    <button class="print-button" onclick="window.print()">🖨️ Print to PDF</button>
+    
     <div class="header">
         <h1>${projectData.project.title}</h1>
         <p>Educational Video Script</p>
         <p>Generated on: ${new Date().toLocaleDateString()}</p>
+        <p>Project ID: ${projectId}</p>
     </div>
     
     ${projectData.lessonSteps.map((step, index) => `
         <div class="step">
             <div class="step-title">Step ${index + 1}: ${step.title || 'Untitled'}</div>
-            <div class="speaker">Speaker: ${step.speaker}</div>
-            ${step.content ? `<div class="content"><strong>Content:</strong> ${step.content}</div>` : ''}
-            ${step.content2 ? `<div class="content"><strong>Additional Content:</strong> ${step.content2}</div>` : ''}
+            <div class="speaker">🎤 Speaker: ${step.speaker}</div>
+            ${step.content ? `<div class="content"><strong>📝 Content:</strong><br>${step.content.replace(/\n/g, '<br>')}</div>` : ''}
+            ${step.content2 ? `<div class="content"><strong>📋 Additional Content:</strong><br>${step.content2.replace(/\n/g, '<br>')}</div>` : ''}
             <div class="narration">
-                <strong>Narration:</strong><br>
-                ${step.narration || 'No narration'}
+                <strong>🎬 Narration:</strong><br>
+                ${(step.narration || 'No narration').replace(/\n/g, '<br>')}
             </div>
-            ${step.visual_type ? `<div class="visual-info">Visual: ${step.visual_type}</div>` : ''}
+            ${step.visual_type ? `<div class="visual-info">🎨 Visual: ${step.visual_type}</div>` : ''}
         </div>
     `).join('')}
+    
+    <script>
+        // Auto-print dialog can be triggered here if needed
+        // setTimeout(() => window.print(), 1000);
+    </script>
 </body>
 </html>`;
     
-    // For now, return HTML (you should implement proper PDF generation)
-    res.setHeader('Content-Type', 'text/html');
-    res.setHeader('Content-Type', 'text/html');
-    res.setHeader('Content-Disposition', `attachment; filename="${projectData.project.title.replace(/[^a-zA-Z0-9]/g, '_')}_script.html"`);
+    // Return HTML that can be printed to PDF
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
     res.send(htmlContent);
    
-   // TODO: Implement proper PDF generation using puppeteer or similar
-   // For now, this returns HTML that can be printed to PDF by the browser
-   
  } catch (error) {
-   console.error('❌ Error exporting PDF:', error);
+   console.error('❌ Error exporting script:', error);
    res.status(500).json({
      success: false,
-     error: error.message || 'PDF export failed'
+     error: error.message || 'Script export failed'
    });
  }
 });
