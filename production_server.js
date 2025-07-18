@@ -1024,7 +1024,7 @@ app.get('/api/download/:projectId', authenticateService, extractUserInfo, async 
   }
 });
 
-// Get video stream URL
+// Get video stream URL - FIXED VERSION
 app.get('/api/stream/:projectId', authenticateService, extractUserInfo, async (req, res) => {
   try {
     const { projectId } = req.params;
@@ -1056,6 +1056,7 @@ app.get('/api/stream/:projectId', authenticateService, extractUserInfo, async (r
         parseInt(expires)
       );
       
+      // Return JSON instead of redirect
       res.json({
         success: true,
         streamUrl: signedUrl,
