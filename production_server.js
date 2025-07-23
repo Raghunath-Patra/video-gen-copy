@@ -2168,17 +2168,17 @@ app.put('/api/project/:projectId/visual-function/:functionName', authenticateSer
     
     // Update visual function in database
     const { data: visualFunction, error } = await supabase
-      .from('visual_functions')
-      .upsert([{
-        project_id: projectId,
-        function_name: functionName,
-        function_code: functionCode,
-        updated_at: new Date()
-      }])
-      .select()
-      .single();
-    
-    if (error) throw error;
+    .from('visual_functions')
+    .update({
+      function_code: functionCode,
+      updated_at: new Date()
+    })
+    .eq('project_id', projectId)
+    .eq('function_name', functionName)
+    .select()
+    .single();
+
+  if (error) throw error;
     
     res.json({
       success: true,
