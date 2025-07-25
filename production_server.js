@@ -1220,6 +1220,91 @@ app.get('/api/audio/:audioId', authenticateService, extractUserInfo, async (req,
   }
 });
 
+// Update project title endpoint
+app.post('/api/update-project-title', authenticateService, extractUserInfo, async (req, res) => {
+  try {
+    const { projectId, title } = req.body;
+    
+    // Validate required fields
+    if (!projectId || !title) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Missing required fields: projectId and title are required' 
+      });
+    }
+    
+    // Validate title length
+    if (title.trim().length === 0) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Title cannot be empty' 
+      });
+    }
+    
+    if (title.length > 100) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Title cannot exceed 100 characters' 
+      });
+    }
+    
+    console.log(`📝 Updating project title for project: ${projectId}`);
+    console.log(`🏷️ New title: "${title}"`);
+    
+    // Verify project ownership
+    const projectData = await DatabaseService.getProject(projectId, req.user.id);
+    if (!projectData) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Project not found or access denied' 
+      });
+    }
+    
+    // Update project title in database
+    const { data: updatedProject, error: updateError } = await supabase
+      .from('projects')
+      .update({
+        title: title.trim(),
+        updated_at: new Date()
+      })
+      .eq('id', projectId)
+      .eq('user_id', req.user.id) // Additional security check
+      .select()
+      .single();
+    
+    if (updateError) {
+      console.error('❌ Error updating project title:', updateError);
+      throw updateError;
+    }
+    
+    if (!updatedProject) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Project not found or no changes made' 
+      });
+    }
+    
+    console.log(`✅ Project title updated successfully for project: ${projectId}`);
+    
+    res.json({
+      success: true,
+      message: 'Project title updated successfully',
+      project: {
+        id: updatedProject.id,
+        title: updatedProject.title,
+        updatedAt: updatedProject.updated_at
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ Error updating project title:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: error.message || 'Failed to update project title' 
+    });
+  }
+});
+
 // MODIFIED: Main endpoint to update a step
 // Now handles saving a staged visual function in the same transaction.
 app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractUserInfo, async (req, res) => {
