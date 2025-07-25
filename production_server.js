@@ -1363,12 +1363,106 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
     
     if (stepError) throw stepError;
     
-    // --- Audio Regeneration Logic (Unchanged) ---
-    let audioGenerated = false;
+    // Regenerate audio if narration or speaker changed
     if (regenerateAudio && lessonStep) {
-        // ... (your existing audio regeneration logic from the reference code goes here)
-        console.log('Audio regeneration would happen here if logic was included.');
-        audioGenerated = true; // Placeholder
+      try {
+        // Get speaker configuration
+        const { data: speakers } = await supabase
+          .from('speakers')
+          .select('*')
+          .eq('project_id', projectId);
+        
+        const speakerConfig = speakers?.find(s => s.speaker_key === stepData.speaker);
+        
+        if (speakerConfig && process.env.SMALLEST_API_KEY) {
+          // STEP 1: Get existing audio file info BEFORE generating new one
+          const { data: oldAudio, error: fetchError } = await supabase
+            .from('audio_files')
+            .select('storage_path, bucket_name, id')
+            .eq('lesson_step_id', lessonStep.id)
+            .single();
+          
+          if (fetchError && fetchError.code !== 'PGRST116') { // PGRST116 = no rows found
+            console.warn('⚠️ Error fetching old audio file info:', fetchError.message);
+          }
+          
+          // STEP 2: Generate new audio
+          const audioBuffer = await generateAudioWithSmallestAi(
+            stepData.narration, 
+            {
+              voice: speakerConfig.voice,
+              model: speakerConfig.model
+            }
+          );
+          
+          // Save temporary audio file
+          const tempAudioPath = `/tmp/temp_audio_${Date.now()}.wav`;
+          await fs.writeFile(tempAudioPath, audioBuffer);
+          
+          // STEP 3: Upload new audio to storage
+          const audioFileName = `${projectId}_step_${stepOrder}_${Date.now()}.wav`;
+          const storagePath = await StorageService.uploadFile(
+            'audio-files',
+            audioFileName,
+            tempAudioPath,
+            req.user.id
+          );
+          
+          // Get audio duration
+          const duration = await getAudioDuration(tempAudioPath);
+          
+          // STEP 4: Delete old audio file from storage BEFORE updating database
+          if (oldAudio && oldAudio.storage_path) {
+            try {
+              console.log(`🗑️ Deleting old audio file from storage: ${oldAudio.storage_path}`);
+              await StorageService.deleteFile(oldAudio.bucket_name, oldAudio.storage_path);
+              console.log(`✅ Old audio file deleted from storage successfully`);
+            } catch (deleteError) {
+              console.error(`❌ Failed to delete old audio file from storage:`, deleteError.message);
+              // Continue anyway - don't fail the entire operation
+            }
+          }
+          
+          // STEP 5: Update/Insert audio file record in database
+          if (oldAudio && oldAudio.id) {
+            // Update existing record
+            const { error: updateError } = await supabase
+              .from('audio_files')
+              .update({
+                storage_path: storagePath,
+                bucket_name: 'audio-files',
+                duration: duration,
+                updated_at: new Date()
+              })
+              .eq('id', oldAudio.id);
+            
+            if (updateError) throw updateError;
+            console.log(`✅ Updated existing audio record in database`);
+          } else {
+            // Insert new record
+            const { error: insertError } = await supabase
+              .from('audio_files')
+              .insert([{
+                lesson_step_id: lessonStep.id,
+                storage_path: storagePath,
+                bucket_name: 'audio-files',
+                duration: duration
+              }]);
+            
+            if (insertError) throw insertError;
+            console.log(`✅ Created new audio record in database`);
+          }
+          
+          // Clean up temp file
+          await fs.unlink(tempAudioPath);
+          audioGenerated = true;
+          
+          console.log(`✅ Audio regeneration complete for step ${stepOrder}`);
+        }
+      } catch (audioError) {
+        console.error('❌ Audio regeneration failed:', audioError);
+        // Don't fail the entire request, just log the error
+      }
     }
     
     res.json({
@@ -1380,7 +1474,17 @@ app.put('/api/project/:projectId/step/:stepOrder', authenticateService, extractU
     
   } catch (error) {
     console.error('❌ Error updating lesson step:', error);
-    res.status(500).json({ success: false, error: error.message || 'Failed to update lesson step' });
+    res.status(500).json({
+      success: false,
+      error: error.message || 'Failed to update lesson step'
+    });
+  }finally {
+    try {
+      await tmpCleaner.clearAll();
+      console.log('✅ /tmp cleanup completed');
+    } catch (cleanupError) {
+      console.warn('Warning: /tmp cleanup failed:', cleanupError.message);
+    }
   }
 });
 
@@ -1553,7 +1657,7 @@ app.post('/api/project/:projectId/regenerate-audio', authenticateService, extrac
   }
 });
 
-// NEW ENDPOINT: To generate a new visual function from a text description
+// NEW ENDPOINT: To generate a new visual function from a text description (Enhanced for reliability)
 app.post('/api/project/:projectId/step/:stepOrder/add-visual', authenticateService, extractUserInfo, async (req, res) => {
     try {
         const { projectId, stepOrder } = req.params;
@@ -1584,6 +1688,7 @@ app.post('/api/project/:projectId/step/:stepOrder/add-visual', authenticateServi
         const Anthropic = require('@anthropic-ai/sdk');
         const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
+        // --- ENHANCED PROMPT ---
         const aiPrompt = `You are an expert at creating JavaScript functions for HTML5 Canvas. A user wants to add a new visual to an educational slide.
 
 USER REQUEST: "${description}"
@@ -1595,19 +1700,23 @@ SLIDE CONTEXT:
 REQUIREMENTS:
 1.  Generate a unique, descriptive, camelCase JavaScript function name (e.g., 'drawBarChart', 'animateSolarSystem').
 2.  Generate the corresponding JavaScript function code. The function should accept (ctx, ...params).
-3.  Return a single, valid JSON object with two keys: "functionName" and "functionCode".
-4.  Do NOT include any explanations, markdown, or wrapper text. Only the JSON object.
+3.  Use canvas drawing commands: ctx.beginPath, ctx.arc, ctx.fillRect, ctx.strokeRect, etc.
+4.  **Crucially, ensure all coordinates fit within the media area: x from 200 to 800, and y from 200 to 600.**
+5.  **Always wrap the drawing logic in ctx.save() and ctx.restore() to prevent context state leakage.**
+6.  Make the drawing educational and clear, relevant to the slide content.
+7.  Return a single, valid JSON object with two keys: "functionName" and "functionCode".
+8.  Do NOT include any explanations, markdown, or wrapper text. Only the JSON object.
 
 EXAMPLE RESPONSE:
 {
   "functionName": "drawSimpleCircle",
-  "functionCode": "function drawSimpleCircle(ctx) {\\n  ctx.beginPath();\\n  ctx.arc(500, 400, 50, 0, 2 * Math.PI);\\n  ctx.fillStyle = '#4A90E2';\\n  ctx.fill();\\n}"
+  "functionCode": "function drawSimpleCircle(ctx) {\\n  ctx.save();\\n  ctx.beginPath();\\n  ctx.arc(500, 400, 50, 0, 2 * Math.PI);\\n  ctx.fillStyle = '#4A90E2';\\n  ctx.fill();\\n  ctx.restore();\\n}"
 }
 
 RESPOND WITH ONLY THE JSON OBJECT:`;
 
         const message = await anthropic.messages.create({
-            model: "claude-sonnet-4-20250514",
+            model: "claude-sonnet-4-20250514", // Or your preferred model
             max_tokens: 4000,
             messages: [{ role: "user", content: aiPrompt }]
         });
@@ -1615,12 +1724,22 @@ RESPOND WITH ONLY THE JSON OBJECT:`;
         if (!message.content || !message.content[0]) {
             throw new Error('No response from AI service');
         }
+        
         const aiResponse = message.content[0].text;
         const cleanJson = aiResponse.replace(/```json\n?|```\n?/g, '').trim();
         const { functionName, functionCode } = JSON.parse(cleanJson);
 
         if (!functionName || !functionCode) {
             throw new Error('AI returned an invalid object for the new visual function.');
+        }
+
+        // --- ADDED: VALIDATE THE GENERATED FUNCTION CODE ---
+        try {
+            new Function('ctx', 'param1', 'param2', 'param3', functionCode);
+            console.log(`✅ AI-generated function '${functionName}' has valid syntax.`);
+        } catch (syntaxError) {
+            // If the AI produces invalid Javascript, throw an error so the user can be notified.
+            throw new Error(`AI generated a function with a syntax error: ${syntaxError.message}`);
         }
         
         // Prepare the updated slide object (in memory)
